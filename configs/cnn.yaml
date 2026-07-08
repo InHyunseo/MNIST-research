@@ -1,0 +1,22 @@
+# MNIST 추론 벤치마크 설정 (모델 arch / 학습 / 벤치 / 전처리)
+model:
+  conv1_channels: 32
+  conv2_channels: 64
+  fc_hidden: 128
+  dropout: 0.25
+
+train:
+  epochs: 5
+  batch_size: 128
+  lr: 0.001
+
+benchmark:
+  seeds: [0, 1, 2, 3, 4]
+  warmup: 100
+  n: 2000
+  threads: 1
+
+# forward()에서 적용하는 정규화 상수 ([0,1] 스케일 기준)
+preprocess:
+  mean: 0.1307
+  std: 0.3081

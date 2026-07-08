@@ -1,0 +1,37 @@
+# ── Python ────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ── 다운로드/외부 (README 명령으로 재생성) ──
+# onnxruntime C++ (수백 MB)
+third_party/
+# MNIST 원본 (torchvision 다운로드)
+data/MNIST/
+# C++용 raw 덤프
+data/*.u8
+
+# ── 생성 산출물 (scripts로 재생성) ──
+models/checkpoints/
+models/onnx/
+logs/
+
+# ── C++ 빌드 ──
+cpp/build/
+
+# ── ROS2 (향후) ──
+install/
+log/
+
+# ── 시크릿 (예방) ──
+.env
+*.key
+*.pem
+secrets*
+
+# ── OS/에디터 ──
+.DS_Store
+*.swp
+
+# results/ (figures·tables·samples)는 추적함 — 리포트 appendix용
