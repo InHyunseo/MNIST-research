@@ -1,8 +1,10 @@
-"""PyTorch(eager) 추론 latency 벤치마크. logs/py_pytorch_s{seed}_{latency,preds}.csv 기록.
+"""PyTorch(eager) 추론 latency 벤치마크.
 
-실행: python python/benchmark_pytorch.py --seed 0 [--n 2000] [--threads 1]
+기본 실행은 기존 baseline 파일명(logs/py_pytorch_s{seed}_*.csv)을 유지한다.
+--threaded-label을 주면 backend comparison용으로 thread를 파일명에 포함한다.
 """
 import argparse
+from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
@@ -24,13 +26,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--n", type=int, default=None)
+    ap.add_argument("--warmup", type=int, default=None)
     ap.add_argument("--threads", type=int, default=None)
+    ap.add_argument("--threaded-label", action="store_true")
+    ap.add_argument("--logdir", type=Path, default=LOGS_DIR)
     args = ap.parse_args()
 
     cfg = load_config()
     b = cfg["benchmark"]
     threads = args.threads or b["threads"]
-    warmup, n = b["warmup"], args.n or b["n"]
+    warmup = args.warmup if args.warmup is not None else b["warmup"]
+    n = args.n or b["n"]
+    label = f"{LABEL}_t{threads}" if args.threaded_label else LABEL
 
     torch.set_num_threads(threads)
     torch.set_grad_enabled(False)
@@ -47,11 +54,12 @@ def main():
 
     inputs = [images[i:i + 1] for i in range(images.shape[0])]
     stats = bench_latency(lambda x: model(x), inputs, warmup, n)
-    print_report(LABEL, threads, warmup, n, acc, stats)
+    print_report(label, threads, warmup, n, acc, stats)
 
-    LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    write_latency_csv(LOGS_DIR / f"{LABEL}_s{args.seed}_latency.csv", stats["times"])
-    write_preds_csv(LOGS_DIR / f"{LABEL}_s{args.seed}_preds.csv", trues, preds)
+    args.logdir.mkdir(parents=True, exist_ok=True)
+    write_latency_csv(args.logdir / f"{label}_s{args.seed}_latency.csv",
+                      stats["times"])
+    write_preds_csv(args.logdir / f"{label}_s{args.seed}_preds.csv", trues, preds)
 
 
 if __name__ == "__main__":

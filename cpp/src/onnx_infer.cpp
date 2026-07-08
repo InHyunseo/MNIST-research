@@ -5,11 +5,28 @@
 constexpr int kPixels = 1 * 28 * 28;
 
 OnnxInfer::OnnxInfer(const std::string& model_path, int threads)
+    : OnnxInfer(model_path, OnnxInferOptions{threads}) {}
+
+OnnxInfer::OnnxInfer(const std::string& model_path, const OnnxInferOptions& options)
     : env_(ORT_LOGGING_LEVEL_WARNING, "onnx_infer"),
       session_(nullptr),
       mem_(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU)) {
-  so_.SetIntraOpNumThreads(threads);
+  so_.SetIntraOpNumThreads(options.threads);
   so_.SetInterOpNumThreads(1);
+  if (options.set_graph_optimization) {
+    so_.SetGraphOptimizationLevel(options.graph_optimization
+                                      ? GraphOptimizationLevel::ORT_ENABLE_ALL
+                                      : GraphOptimizationLevel::ORT_DISABLE_ALL);
+  }
+  if (options.set_memory_reuse) {
+    if (options.memory_reuse) {
+      so_.EnableCpuMemArena();
+      so_.EnableMemPattern();
+    } else {
+      so_.DisableCpuMemArena();
+      so_.DisableMemPattern();
+    }
+  }
   session_ = Ort::Session(env_, model_path.c_str(), so_);
 
   Ort::AllocatorWithDefaultOptions alloc;

@@ -16,6 +16,7 @@ data/*.u8
 models/checkpoints/
 models/onnx/
 logs/
+results/
 
 # ── C++ 빌드 ──
 cpp/build/
@@ -33,5 +34,3 @@ secrets*
 # ── OS/에디터 ──
 .DS_Store
 *.swp
-
-# results/ (figures·tables·samples)는 추적함 — 리포트 appendix용
