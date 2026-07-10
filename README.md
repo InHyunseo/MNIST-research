@@ -8,14 +8,15 @@ MNIST 단일 숫자 분류에서 출발해 고정 길이와 가변 길이 숫자
 
 ```text
 base-single/       단일 숫자 CNN과 PyTorch/ONNX Runtime 추론 기준선
-static-sequence/   고정 길이 숫자열 인식 (예정)
+static-sequence/   CNN 기반 고정 3자리 숫자열 인식
 dynamic-sequence/  가변 길이 attention 기반 숫자열 인식 (예정)
 shared/            stage 공통 실험 인프라 (예정)
 ros2_ws/           ROS2 추론 wrapper (예정)
 third_party/       루트에서 공유하는 외부 라이브러리 (git 제외)
 ```
 
-현재 구현된 파이프라인은 [`base-single/`](base-single/README.md)에 있다.
+현재 구현된 파이프라인은 [`base-single/`](base-single/README.md)과
+[`static-sequence/`](static-sequence/README.md)에 있다.
 
 ## Base single quick start
 
@@ -35,3 +36,16 @@ bash base-single/scripts/run_visualize.sh baseline
 
 ONNX Runtime C++ 설치와 세부 실험 모드는
 [`base-single/README.md`](base-single/README.md)를 참고한다.
+
+## Static sequence quick start
+
+```bash
+bash static-sequence/scripts/run_test.sh
+bash static-sequence/scripts/run_train.sh
+bash static-sequence/scripts/run_evaluate.sh
+bash static-sequence/scripts/run_export.sh
+N=20 WARMUP=5 bash static-sequence/scripts/run_benchmark.sh
+```
+
+모델 구조와 전체 실행 계약은
+[`static-sequence/README.md`](static-sequence/README.md)를 참고한다.
