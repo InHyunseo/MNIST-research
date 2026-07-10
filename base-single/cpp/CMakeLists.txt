@@ -7,8 +7,8 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# 다운로드한 ONNX Runtime C++ (third_party/onnxruntime)
-set(ORT_DIR ${CMAKE_SOURCE_DIR}/../third_party/onnxruntime)
+# 저장소 루트에서 공유하는 ONNX Runtime C++ (third_party/onnxruntime)
+set(ORT_DIR ${CMAKE_SOURCE_DIR}/../../third_party/onnxruntime)
 
 add_executable(bench src/main.cpp src/onnx_infer.cpp)
 target_include_directories(bench PRIVATE include ${ORT_DIR}/include)

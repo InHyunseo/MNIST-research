@@ -5,10 +5,12 @@
 #   tuning-ablation     -> logs/tuning_ablation/
 #   backend-comparison  -> logs/backend_comparison/
 set -e
-cd "$(dirname "$0")/.."
+STAGE_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$STAGE_ROOT/.." && pwd)"
+cd "$STAGE_ROOT"
 
 MODE="${1:-baseline}"
-PY=.venv/bin/python
+PY="${PY:-$REPO_ROOT/.venv/bin/python}"
 N="${N:-2000}"
 SEEDS="${SEEDS:-0 1 2 3 4}"
 THREADS="${THREADS:-1 2 4}"

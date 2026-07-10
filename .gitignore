@@ -8,18 +8,18 @@ venv/
 # onnxruntime C++ (수백 MB)
 third_party/
 # MNIST 원본 (torchvision 다운로드)
-data/MNIST/
+**/data/MNIST/
 # C++용 raw 덤프
-data/*.u8
+**/data/*.u8
 
 # ── 생성 산출물 (scripts로 재생성) ──
-models/checkpoints/
-models/onnx/
-logs/
-results/
+**/models/checkpoints/
+**/models/onnx/
+**/logs/
+**/results/
 
 # ── C++ 빌드 ──
-cpp/build/
+**/cpp/build/
 
 # ── ROS2 (향후) ──
 install/

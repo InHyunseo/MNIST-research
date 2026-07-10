@@ -3,7 +3,7 @@ from pathlib import Path
 
 import yaml
 
-ROOT = Path(__file__).resolve().parents[2]   # mid_project/
+ROOT = Path(__file__).resolve().parents[2]   # base-single/
 CONFIG_PATH = ROOT / "configs" / "cnn.yaml"
 
 CKPT_DIR = ROOT / "models" / "checkpoints"
