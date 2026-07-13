@@ -1,0 +1,63 @@
+project:
+  experiment_name: mnist_overlap_attention
+  data_seed: 2026
+  training_seeds: [0, 1, 2]
+
+dataset:
+  canvas_size: 76
+  digit_size: 28
+  train_samples: 60000
+  validation_pairs: 3330
+  test_pairs: 10000
+  source_train_samples: 50000
+  source_validation_samples: 10000
+  stroke_threshold: 0.5
+  composition: maximum
+
+overlap:
+  low: [0.15, 0.30]
+  middle: [0.45, 0.60]
+  high: [0.75, 0.90]
+  directions:
+    - [-1, -1]
+    - [-1, 0]
+    - [-1, 1]
+    - [0, -1]
+    - [0, 1]
+    - [1, -1]
+    - [1, 0]
+    - [1, 1]
+
+model:
+  model_names:
+    - lenet
+    - shared_attention
+    - class_attention
+  first_conv_channels: 6
+  second_conv_channels: 16
+  first_hidden_features: 120
+  second_hidden_features: 84
+  kernel_size: 5
+  pool_size: 2
+  class_count: 10
+
+train:
+  maximum_epochs: 20
+  batch_size: 128
+  learning_rate: 0.001
+  early_stopping_patience: 3
+  early_stopping_minimum_delta: 0.001
+  data_loader_workers: 0
+
+evaluation:
+  batch_size: 256
+  bootstrap_iterations: 5000
+  attention_iou_thresholds:
+    start: 0.05
+    stop: 0.95
+    step: 0.05
+  minimum_exclusive_pixels: 5
+
+report:
+  figure_dpi: 150
+  save_png: true
