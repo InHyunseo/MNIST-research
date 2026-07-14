@@ -1,93 +1,75 @@
-"""MNIST Overlap Attention의 모든 실행 단계를 하나의 한국어 CLI로 제공한다.
+"""실험 전체 단계를 제공하는 한국어 CLI (`mnist-overlap`, `python -m mnist_overlap`)."""
 
-입력:
-    `prepare-data`, `validate-data`, `train`, `evaluate`, `report`, `experiment`, `run-all`
-
-출력:
-    실행 결과, 생성 file 경로, 실패 원인
-
-연결:
-    `python -m mnist_overlap`과 shell script를 기능별 package에 연결한다.
-"""
+from __future__ import annotations
 
 import argparse
 from pathlib import Path
 from typing import Sequence
 
-from .configuration import (
+from .config import (
     DEFAULT_CONFIG_PATH,
+    SUPPORTED_MODEL_NAMES,
     create_output_directories,
     load_config,
 )
 from .data import prepare_data, validate_saved_data
-from .evaluation import evaluate_models
-from .pipeline import run_experiment, run_full_pipeline
+from .evaluation import analyze_saved_results, evaluate_models
 from .reporting import create_report
 from .training import train_models
 
-MODEL_CHOICES = ("lenet", "shared_attention", "class_attention")
 DEVICE_CHOICES = ("cpu", "cuda")
 
 
-class KoreanArgumentParser(argparse.ArgumentParser):
-    """Argparse의 기본 heading과 오류 접두어를 한국어로 표시한다.
+def run_experiment(
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    device_name: str = "cpu",
+    overwrite: bool = False,
+) -> dict[str, object]:
+    """데이터 준비·검증 후 config의 전체 모델×seed를 학습하고 평가 log를 생성한다."""
+    config = load_config(config_path)
+    create_output_directories()
 
-    입력:
-        일반 ArgumentParser와 동일한 parser 설정 및 command argument
+    data_paths = prepare_data(config, overwrite=overwrite)
+    validation_messages = validate_saved_data(config)
+    training_results = train_models(
+        config_path=config_path,
+        device_name=device_name,
+        overwrite=overwrite,
+    )
+    evaluation_paths = evaluate_models(
+        config_path=config_path,
+        device_name=device_name,
+        overwrite=overwrite,
+    )
 
-    처리:
-        기본 help text의 usage/options 표기와 오류 출력 형식을 변환한다.
+    return {
+        "data": data_paths,
+        "validation": validation_messages,
+        "training": training_results,
+        "evaluation": evaluation_paths,
+    }
 
-    출력:
-        한국어 heading과 도움말을 사용하는 ArgumentParser
-    """
 
-    def format_help(self) -> str:
-        """기본 help text의 고정 영어 heading을 한국어로 바꾼다.
-
-        입력:
-            현재 parser에 등록된 positional 및 optional action
-
-        처리:
-            부모 class의 help 문자열에서 usage와 options heading을 치환한다.
-
-        출력:
-            사용자에게 표시할 한국어 help 문자열
-        """
-        help_text = super().format_help()
-        help_text = help_text.replace("usage:", "사용법:")
-        return help_text.replace("options:", "선택 항목:")
-
-    def error(self, message: str) -> None:
-        """Argument parsing 오류를 한국어 접두어와 함께 출력한다.
-
-        입력:
-            Argparse가 생성한 오류 상세 문자열
-
-        처리:
-            Usage를 stderr에 표시하고 종료 코드 2로 parser를 종료한다.
-
-        출력:
-            반환값은 없으며 `SystemExit(2)`가 발생한다.
-        """
-        self.print_usage()
-        self.exit(2, f"{self.prog}: 입력 오류: {message}\n")
+def run_full_pipeline(
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    device_name: str = "cpu",
+    overwrite: bool = False,
+) -> dict[str, object]:
+    """전체 실험(`run_experiment`)과 최종 report 생성을 연속 실행한다."""
+    pipeline_results = run_experiment(
+        config_path=config_path,
+        device_name=device_name,
+        overwrite=overwrite,
+    )
+    config = load_config(config_path)
+    pipeline_results["report"] = create_report(config)
+    return pipeline_results
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """최상위 command와 일곱 subcommand의 argument parser를 구성한다.
-
-    입력:
-        고정 CLI command와 기본 config 경로
-
-    처리:
-        공통 option과 단계별 option을 한국어 help 문자열로 등록한다.
-
-    출력:
-        완성된 ArgumentParser instance
-    """
-    parser = KoreanArgumentParser(
-        prog="python -m mnist_overlap",
+    """최상위 command와 여덟 subcommand의 argument parser를 구성한다."""
+    parser = argparse.ArgumentParser(
+        prog="mnist-overlap",
         description="겹친 MNIST 숫자 인식과 spatial attention 비교 실험을 실행합니다.",
         add_help=False,
     )
@@ -132,6 +114,17 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_argument(evaluate_parser)
     _add_seed_argument(evaluate_parser)
     _add_device_argument(evaluate_parser)
+    _add_overwrite_argument(
+        evaluate_parser,
+        "선택한 prediction과 attention cache를 다시 계산합니다.",
+    )
+
+    analyze_parser = subparsers.add_parser(
+        "analyze",
+        help="저장된 cache와 학습 log에서 전체 통계를 다시 계산합니다.",
+        add_help=False,
+    )
+    _add_config_argument(analyze_parser)
 
     report_parser = subparsers.add_parser(
         "report",
@@ -149,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_device_argument(experiment_parser)
     _add_overwrite_argument(
         experiment_parser,
-        "Manifest와 checkpoint를 모두 새로 생성합니다.",
+        "Manifest와 전체 학습·평가 artifact를 새로 생성합니다.",
     )
 
     run_all_parser = subparsers.add_parser(
@@ -159,7 +152,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_config_argument(run_all_parser)
     _add_device_argument(run_all_parser)
-    _add_overwrite_argument(run_all_parser, "Manifest와 checkpoint를 모두 새로 생성합니다.")
+    _add_overwrite_argument(
+        run_all_parser,
+        "Manifest와 전체 학습·평가 artifact를 새로 생성합니다.",
+    )
 
     command_parsers = (
         parser,
@@ -167,6 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
         validate_parser,
         train_parser,
         evaluate_parser,
+        analyze_parser,
         report_parser,
         experiment_parser,
         run_all_parser,
@@ -178,17 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(arguments: Sequence[str] | None = None) -> None:
-    """CLI argument를 해석해 대응하는 실행 함수를 호출한다.
-
-    입력:
-        선택적인 argument 문자열 sequence, 없으면 `sys.argv`
-
-    처리:
-        Subcommand별 option을 기능 package의 명시적 parameter로 변환한다.
-
-    출력:
-        반환값은 없으며 생성 경로와 주요 결과를 표준 출력에 표시한다.
-    """
+    """CLI argument를 해석해 대응하는 실행 함수를 호출한다."""
     parser = build_parser()
     parsed = parser.parse_args(arguments)
     config_path = parsed.config
@@ -216,7 +203,8 @@ def main(arguments: Sequence[str] | None = None) -> None:
         )
         for result in results:
             print(
-                f"학습 완료: epoch={result.best_epoch}, "
+                f"학습 완료: best_epoch={result.best_epoch}, "
+                f"epochs_run={result.epochs_run}, "
                 f"validation_exact={result.best_validation_exact_match:.4f}, "
                 f"checkpoint={result.checkpoint_path}"
             )
@@ -228,8 +216,13 @@ def main(arguments: Sequence[str] | None = None) -> None:
             model_name=parsed.model,
             seed=parsed.seed,
             device_name=parsed.device,
+            overwrite=parsed.overwrite,
         )
         _print_paths(paths)
+        return
+
+    if parsed.command == "analyze":
+        _print_paths(analyze_saved_results(config_path=config_path))
         return
 
     if parsed.command == "report":
@@ -260,17 +253,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
 
 
 def _add_config_argument(parser: argparse.ArgumentParser) -> None:
-    """Subcommand에 공통 config 경로 option을 추가한다.
-
-    입력:
-        Option을 추가할 subcommand parser
-
-    처리:
-        기본 YAML 경로를 사용하는 `--config` argument를 등록한다.
-
-    출력:
-        반환값은 없으며 parser가 제자리에서 변경된다.
-    """
+    """공통 `--config` option을 추가한다."""
     parser.add_argument(
         "--config",
         type=Path,
@@ -280,17 +263,7 @@ def _add_config_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_help_argument(parser: argparse.ArgumentParser) -> None:
-    """Parser에 한국어 설명을 사용하는 help option을 추가한다.
-
-    입력:
-        `add_help=False`로 생성한 parser
-
-    처리:
-        `-h`와 `--help`를 argparse help action에 연결한다.
-
-    출력:
-        반환값은 없으며 parser가 제자리에서 변경된다.
-    """
+    """한국어 설명을 사용하는 `-h/--help` option을 추가한다."""
     parser.add_argument(
         "-h",
         "--help",
@@ -300,37 +273,17 @@ def _add_help_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_model_argument(parser: argparse.ArgumentParser) -> None:
-    """Train/evaluate parser에 선택적인 model option을 추가한다.
-
-    입력:
-        Option을 추가할 subcommand parser
-
-    처리:
-        세 지원 모델 중 하나를 선택하는 `--model` argument를 등록한다.
-
-    출력:
-        반환값은 없으며 parser가 제자리에서 변경된다.
-    """
+    """선택적인 `--model` option을 추가한다."""
     parser.add_argument(
         "--model",
-        choices=MODEL_CHOICES,
+        choices=SUPPORTED_MODEL_NAMES,
         default=None,
         help="단일 모델만 실행합니다. 생략하면 config의 모든 모델을 실행합니다.",
     )
 
 
 def _add_seed_argument(parser: argparse.ArgumentParser) -> None:
-    """Train/evaluate parser에 선택적인 seed option을 추가한다.
-
-    입력:
-        Option을 추가할 subcommand parser
-
-    처리:
-        정수 하나를 받는 `--seed` argument를 등록한다.
-
-    출력:
-        반환값은 없으며 parser가 제자리에서 변경된다.
-    """
+    """선택적인 `--seed` option을 추가한다."""
     parser.add_argument(
         "--seed",
         type=int,
@@ -340,17 +293,7 @@ def _add_seed_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_device_argument(parser: argparse.ArgumentParser) -> None:
-    """실행 parser에 CPU/CUDA device option을 추가한다.
-
-    입력:
-        Option을 추가할 subcommand parser
-
-    처리:
-        기본값이 CPU인 `--device` argument를 등록한다.
-
-    출력:
-        반환값은 없으며 parser가 제자리에서 변경된다.
-    """
+    """기본값이 CPU인 `--device` option을 추가한다."""
     parser.add_argument(
         "--device",
         choices=DEVICE_CHOICES,
@@ -363,32 +306,12 @@ def _add_overwrite_argument(
     parser: argparse.ArgumentParser,
     help_text: str,
 ) -> None:
-    """Artifact 재생성을 제어하는 overwrite flag를 추가한다.
-
-    입력:
-        Option을 추가할 parser와 사용자에게 표시할 한국어 설명
-
-    처리:
-        Boolean `--overwrite` flag를 등록한다.
-
-    출력:
-        반환값은 없으며 parser가 제자리에서 변경된다.
-    """
+    """Artifact 재생성을 제어하는 `--overwrite` flag를 추가한다."""
     parser.add_argument("--overwrite", action="store_true", help=help_text)
 
 
 def _print_paths(paths: object) -> None:
-    """실행 함수 반환 경로를 사용자가 읽기 좋은 줄 단위로 출력한다.
-
-    입력:
-        Path 목록 또는 이름과 Path의 dictionary
-
-    처리:
-        Dictionary와 iterable을 구분해 각 항목을 한 줄로 출력한다.
-
-    출력:
-        반환값은 없으며 표준 출력에 생성 경로가 표시된다.
-    """
+    """실행 함수가 반환한 경로들을 줄 단위로 출력한다."""
     if isinstance(paths, dict):
         for name, path in paths.items():
             print(f"{name}: {path}")

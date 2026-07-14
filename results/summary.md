@@ -15,8 +15,8 @@
 ## 핵심 결과
 
 - LeNet 정확도는 Low에서 High로 21.78%p (95% CI [21.07, 22.50]) 감소했다.
-- High overlap에서 Class attention은 LeNet보다 0.37%p (95% CI [-0.15, 0.92]) 높았지만 신뢰구간이 0을 포함했다.
-- High overlap에서 Class attention은 Shared attention보다 0.81%p (95% CI [0.26, 1.35]) 높았고 신뢰구간이 0보다 컸다.
+- Seed-averaged High overlap에서 Class attention은 LeNet보다 0.37%p (95% CI [-0.15, 0.92]) 높았지만 신뢰구간이 0을 포함했다.
+- Seed-averaged High overlap에서 Class attention은 Shared attention보다 0.81%p (95% CI [0.26, 1.35]) 높았고 신뢰구간이 0보다 컸다.
 - Class attention의 LeNet 대비 개선 폭이 Low보다 High에서 더 커졌는지를 본 difference-in-differences는 -0.25%p (95% CI [-0.89, 0.40])로 0을 포함했다.
 - 세 평균 정확도에서는 Class attention이 모든 overlap level에서 가장 높았지만, plain LeNet 대비 일관된 개선이라고 결론 내릴 근거는 충분하지 않았다.
 
@@ -46,7 +46,7 @@
 
 ## Paired bootstrap
 
-Test의 동일 pair ID를 유지해 5,000회 재표집한 95% 신뢰구간이다.
+세 seed의 sample별 correctness를 먼저 평균하고, Test의 동일 pair ID를 유지해 5,000회 재표집한 95% 신뢰구간이다. 이는 seed-averaged checkpoint의 test-pair 불확실성을 나타낸다.
 
 | 비교 | 추정 차이 (%p) | 95% CI (%p) | 판단 |
 |---|---:|---:|---|
@@ -54,6 +54,43 @@ Test의 동일 pair ID를 유지해 5,000회 재표집한 95% 신뢰구간이다
 | High: Class − LeNet | 0.37 | [-0.15, 0.92] | 0 포함 |
 | High: Class − Shared | 0.81 | [0.26, 1.35] | 0 미포함 |
 | (Class − LeNet): High − Low | -0.25 | [-0.89, 0.40] | 0 포함 |
+
+## 학습 seed 안정성
+
+각 신뢰구간은 하나의 학습 seed 안에서 동일 test pair를 5,000회 재표집한 결과다. 따라서 해당 checkpoint의 test-pair 불확실성은 보여주지만 새 학습 seed에 대한 불확실성을 대신하지 않는다.
+
+| 비교 | Seed | 추정 차이 (%p) | 95% CI (%p) |
+|---|---:|---:|---:|
+| LeNet: Low − High | 0 | 20.45 | [19.50, 21.43] |
+| High: Class − LeNet | 0 | -2.79 | [-3.71, -1.87] |
+| High: Class − Shared | 0 | -0.75 | [-1.64, 0.13] |
+| (Class − LeNet): High − Low | 0 | -2.38 | [-3.45, -1.27] |
+| LeNet: Low − High | 1 | 21.11 | [20.13, 22.10] |
+| High: Class − LeNet | 1 | 0.53 | [-0.40, 1.44] |
+| High: Class − Shared | 1 | 3.13 | [2.19, 4.06] |
+| (Class − LeNet): High − Low | 1 | -0.48 | [-1.60, 0.62] |
+| LeNet: Low − High | 2 | 23.78 | [22.79, 24.80] |
+| High: Class − LeNet | 2 | 3.38 | [2.46, 4.30] |
+| High: Class − Shared | 2 | 0.04 | [-0.81, 0.93] |
+| (Class − LeNet): High − Low | 2 | 2.10 | [0.96, 3.18] |
+
+High overlap의 Class−LeNet 구간은 양수 1개, 음수 1개, 0 포함 1개였다. Class−Shared 구간은 양수 1개, 음수 0개, 0 포함 2개였다. Seed 평균 차이는 양수지만 모든 학습 반복에서 같은 방향은 아니었다.
+
+### Early-stopping 상태
+
+| Model | Seed | 실행 epoch | Best epoch | Best val. | Final val. |
+|---|---:|---:|---:|---:|---:|
+| LeNet | 0 | 18 | 15 | 79.76% | 78.74% |
+| LeNet | 1 | 18 | 15 | 78.22% | 77.90% |
+| LeNet | 2 | 16 | 13 | 78.15% | 77.51% |
+| Shared attention | 0 | 19 | 16 | 78.65% | 78.59% |
+| Shared attention | 1 | 20 | 19 | 77.28% | 76.93% |
+| Shared attention | 2 | 17 | 14 | 78.92% | 78.81% |
+| Class attention | 0 | 17 | 14 | 78.87% | 78.01% |
+| Class attention | 1 | 20 | 20 | 79.34% | 79.34% |
+| Class attention | 2 | 19 | 16 | 80.95% | 80.34% |
+
+Class attention에서 최대 20 epoch가 best였던 실행은 seed 1이다. 나머지 seed는 더 일찍 best checkpoint를 선택했으므로 모든 Class attention 실행이 공통으로 epoch 부족이었다고 보기는 어렵다.
 
 ## Attention 분석
 
@@ -114,4 +151,6 @@ Heatmap의 각 cell은 seed별 sample correctness를 먼저 평균한 뒤 해당
 - [Paired bootstrap 표](tables/bootstrap_intervals.csv)
 - [Attention 분석표](tables/attention_metrics.csv)
 - [모델 비용표](tables/model_costs.csv)
+- [Seed별 paired 효과표](tables/seed_effects.csv)
+- [학습 안정성표](tables/training_stability.csv)
 - 세부 class 및 pair 결과는 `logs/metrics/`의 CSV에 저장된다.

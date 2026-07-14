@@ -1,5 +1,0 @@
-comparison,estimate,confidence_lower,confidence_upper
-lenet_low_minus_high,0.2178,0.2107,0.22496666666666665
-class_attention_minus_lenet_high,0.003733333333333334,-0.0014674999999999955,0.0092
-class_attention_minus_shared_high,0.008066666666666668,0.0026333333333333334,0.013466666666666665
-class_attention_vs_lenet_high_low_difference,-0.002533333333333334,-0.0089,0.004000000000000001

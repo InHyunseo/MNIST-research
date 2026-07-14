@@ -7,8 +7,6 @@ build/
 dist/
 
 data/raw/
-data/manifests/*
-models/checkpoints/*.pt
-logs/training/*.csv
-logs/predictions/*.npz
-logs/metrics/*.csv
+data/manifests/
+outputs/
+OverlapMNIST_revised_plan.md

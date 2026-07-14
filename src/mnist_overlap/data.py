@@ -1,13 +1,7 @@
-"""Controlled Overlap MNIST manifest를 생성·검증하고 image를 합성한다.
+"""Controlled Overlap MNIST 데이터: manifest 생성·검증, image 합성, Dataset.
 
-입력:
-    MNIST 원본 tensor, YAML data/overlap 설정, 저장된 manifest
-
-출력:
-    Source-disjoint manifest와 합성 image/mask 및 무결성 검사 결과
-
-연결:
-    Data 공개 API와 Dataset이 호출하며 Dataset class 자체는 dataset 모듈에 둔다.
+두 MNIST 숫자를 pair-center 고정 방식으로 max 합성하며, 모든 좌표를 manifest에
+기록해 재실행 시 동일한 sample을 지연 재구성한다.
 """
 
 from __future__ import annotations
@@ -19,12 +13,15 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch.utils.data import Dataset
 from torchvision.datasets import MNIST
 
-from ..configuration import (
+from .config import (
+    CLASS_COUNT,
     MANIFEST_DIR,
     OVERLAP_LEVELS,
     RAW_DATA_DIR,
+    ExperimentConfig,
     data_config_fingerprint,
 )
 
@@ -60,17 +57,11 @@ MANIFEST_FIELD_NAMES = (
 # -----------------------------------------------------------------------------
 
 
-def prepare_data(config: dict[str, Any], overwrite: bool = False) -> dict[str, Path]:
+def prepare_data(config: ExperimentConfig, overwrite: bool = False) -> dict[str, Path]:
     """MNIST를 내려받고 세 split의 고정 manifest를 생성한다.
 
-    입력:
-        전체 config와 기존 manifest 덮어쓰기 여부
-
-    처리:
-        Source-disjoint 분할 후 train 및 paired validation/test metadata를 만든다.
-
-    출력:
-        생성하거나 재사용한 fingerprint와 manifest 경로 dictionary
+    기존 manifest가 현재 data fingerprint와 일치하면 재사용하고,
+    불일치하면 `--overwrite`를 요구하는 ValueError를 낸다.
     """
     paths = {
         "config_fingerprint": DATA_FINGERPRINT_PATH,
@@ -89,12 +80,12 @@ def prepare_data(config: dict[str, Any], overwrite: bool = False) -> dict[str, P
     MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
     training_source = MNIST(RAW_DATA_DIR, train=True, download=True)
     test_source = MNIST(RAW_DATA_DIR, train=False, download=True)
-    random_generator = np.random.default_rng(int(config["project"]["data_seed"]))
+    random_generator = np.random.default_rng(config.project.data_seed)
 
     # 원본 index부터 분리해 합성 sample 사이의 source 누수를 막는다.
     train_source_indices, validation_source_indices = create_source_split(
         training_source.targets.numpy(),
-        int(config["dataset"]["source_train_samples"]),
+        config.dataset.source_train_samples,
         random_generator,
     )
     np.savez_compressed(
@@ -114,7 +105,7 @@ def prepare_data(config: dict[str, Any], overwrite: bool = False) -> dict[str, P
         training_source.data.numpy(),
         training_source.targets.numpy(),
         validation_source_indices,
-        int(config["dataset"]["validation_pairs"]),
+        config.dataset.validation_pairs,
         config,
         random_generator,
     )
@@ -122,7 +113,7 @@ def prepare_data(config: dict[str, Any], overwrite: bool = False) -> dict[str, P
         test_source.data.numpy(),
         test_source.targets.numpy(),
         np.arange(len(test_source), dtype=np.int32),
-        int(config["dataset"]["test_pairs"]),
+        config.dataset.test_pairs,
         config,
         random_generator,
     )
@@ -141,17 +132,7 @@ def create_source_split(
     train_sample_count: int,
     random_generator: np.random.Generator,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """MNIST train 원본 index를 label-stratified 방식으로 분리한다.
-
-    입력:
-        원본 label, train source 수, NumPy random generator
-
-    처리:
-        Class별 비율 quota를 계산하고 각 class index를 독립적으로 섞는다.
-
-    출력:
-        서로 겹치지 않는 train 및 validation source index array
-    """
+    """MNIST train 원본 index를 label-stratified 방식으로 겹치지 않게 분리한다."""
     if not 0 < train_sample_count < len(labels):
         raise ValueError("train_sample_count는 0보다 크고 원본 수보다 작아야 합니다.")
 
@@ -186,22 +167,12 @@ def create_training_manifest(
     source_images: np.ndarray,
     source_labels: np.ndarray,
     allowed_source_indices: np.ndarray,
-    config: dict[str, Any],
+    config: ExperimentConfig,
     random_generator: np.random.Generator,
 ) -> dict[str, np.ndarray]:
-    """Class pair와 overlap level이 균형인 train manifest를 생성한다.
-
-    입력:
-        원본 image/label, 허용 source index, config, random generator
-
-    처리:
-        45개 class pair와 세 overlap level 조합을 반복해 독립 sample을 만든다.
-
-    출력:
-        Field별 NumPy array로 구성된 train manifest
-    """
-    sample_count = int(config["dataset"]["train_samples"])
-    class_pairs = list(combinations(range(int(config["model"]["class_count"])), 2))
+    """45개 class pair × 세 overlap level이 균형인 train manifest를 생성한다."""
+    sample_count = config.dataset.train_samples
+    class_pairs = list(combinations(range(CLASS_COUNT), 2))
     sampling_cells = list(product(class_pairs, OVERLAP_LEVELS))
     repeated_cells = _repeat_and_shuffle(sampling_cells, sample_count, random_generator)
     source_indices_by_class = _group_source_indices_by_class(
@@ -209,9 +180,9 @@ def create_training_manifest(
     )
 
     records = []
-    directions = config["overlap"]["directions"]
+    directions = config.overlap.directions
     for sample_id, (class_pair, overlap_level) in enumerate(repeated_cells):
-        direction = tuple(directions[sample_id % len(directions)])
+        direction = directions[sample_id % len(directions)]
         records.append(_create_manifest_record(
             source_images,
             source_indices_by_class,
@@ -232,31 +203,24 @@ def create_paired_manifest(
     source_labels: np.ndarray,
     allowed_source_indices: np.ndarray,
     pair_count: int,
-    config: dict[str, Any],
+    config: ExperimentConfig,
     random_generator: np.random.Generator,
 ) -> dict[str, np.ndarray]:
-    """원본과 방향을 공유하는 paired validation 또는 test manifest를 생성한다.
+    """Pair마다 원본 두 개와 이동 방향을 고정한 채 세 overlap level sample을 만든다.
 
-    입력:
-        원본 image/label, 허용 source index, pair 수, config, random generator
-
-    처리:
-        각 pair마다 Low/Middle/High 변위만 달리한 세 sample을 만든다.
-
-    출력:
-        Field별 NumPy array로 구성된 paired manifest
+    같은 pair_id의 세 row는 overlap 강도만 다르므로 paired 비교가 가능하다.
     """
-    class_pairs = list(combinations(range(int(config["model"]["class_count"])), 2))
+    class_pairs = list(combinations(range(CLASS_COUNT), 2))
     repeated_pairs = _repeat_and_shuffle(class_pairs, pair_count, random_generator)
     source_indices_by_class = _group_source_indices_by_class(
         source_labels, allowed_source_indices
     )
-    directions = config["overlap"]["directions"]
+    directions = config.overlap.directions
 
     records = []
     sample_id = 0
     for pair_id, class_pair in enumerate(repeated_pairs):
-        direction = tuple(directions[pair_id % len(directions)])
+        direction = directions[pair_id % len(directions)]
         source_index_first = int(
             random_generator.choice(source_indices_by_class[class_pair[0]])
         )
@@ -295,17 +259,7 @@ def render_overlap_sample(
     canvas_size: int,
     stroke_threshold: float,
 ) -> dict[str, torch.Tensor]:
-    """두 원본 숫자를 canvas에 max 합성하고 source별 mask를 만든다.
-
-    입력:
-        두 `[28, 28]` image, 두 offset, canvas 크기, stroke threshold
-
-    처리:
-        각 image를 별도 canvas에 배치해 maximum과 mask 차집합을 계산한다.
-
-    출력:
-        합성 image, 두 mask, 두 exclusive mask dictionary
-    """
+    """두 원본 숫자를 canvas에 max 합성하고 source별 mask와 exclusive mask를 만든다."""
     canvas_first = torch.zeros((canvas_size, canvas_size), dtype=torch.float32)
     canvas_second = torch.zeros_like(canvas_first)
     _place_image(canvas_first, source_image_first, offset_first)
@@ -323,33 +277,13 @@ def render_overlap_sample(
 
 
 def load_manifest(path: str | Path) -> dict[str, np.ndarray]:
-    """압축 manifest를 memory dictionary로 읽는다.
-
-    입력:
-        `.npz` manifest 경로
-
-    처리:
-        Archive field를 복사한 뒤 file handle을 닫는다.
-
-    출력:
-        Field 이름과 NumPy array의 dictionary
-    """
+    """압축 manifest NPZ를 memory dictionary로 읽는다."""
     with np.load(Path(path), allow_pickle=False) as archive:
         return {field_name: archive[field_name] for field_name in archive.files}
 
 
 def save_manifest(path: str | Path, manifest: dict[str, np.ndarray]) -> None:
-    """Manifest dictionary를 압축 NPZ로 저장한다.
-
-    입력:
-        출력 경로와 field별 NumPy array
-
-    처리:
-        `np.savez_compressed`로 단일 archive를 기록한다.
-
-    출력:
-        반환값은 없으며 지정 경로에 manifest file이 생성된다.
-    """
+    """Manifest dictionary를 압축 NPZ로 저장한다."""
     np.savez_compressed(Path(path), **manifest)
 
 
@@ -358,18 +292,8 @@ def save_manifest(path: str | Path, manifest: dict[str, np.ndarray]) -> None:
 # -----------------------------------------------------------------------------
 
 
-def validate_saved_data(config: dict[str, Any]) -> list[str]:
-    """저장된 source split과 세 manifest의 데이터 계약을 검사한다.
-
-    입력:
-        현재 전체 config
-
-    처리:
-        Fingerprint, source 교집합, field 길이, overlap, pairing을 확인한다.
-
-    출력:
-        통과한 검사를 설명하는 한국어 문자열 목록
-    """
+def validate_saved_data(config: ExperimentConfig) -> list[str]:
+    """저장된 source split과 세 manifest가 현재 데이터 계약을 만족하는지 검사한다."""
     if not SOURCE_SPLIT_PATH.exists():
         raise FileNotFoundError(
             "Source split이 없습니다. "
@@ -388,9 +312,9 @@ def validate_saved_data(config: dict[str, Any]) -> list[str]:
 
     messages = ["Train과 validation source index가 분리되어 있습니다."]
     expected_sizes = {
-        "train": int(config["dataset"]["train_samples"]),
-        "validation": int(config["dataset"]["validation_pairs"]) * 3,
-        "test": int(config["dataset"]["test_pairs"]) * 3,
+        "train": config.dataset.train_samples,
+        "validation": config.dataset.validation_pairs * 3,
+        "test": config.dataset.test_pairs * 3,
     }
     for split_name, expected_size in expected_sizes.items():
         manifest = load_manifest(MANIFEST_PATHS[split_name])
@@ -411,17 +335,7 @@ def bounding_box_overlap_ratio(
     displacement_y: int,
     digit_size: int,
 ) -> float:
-    """동일 크기 digit box 두 개의 면적 overlap 비율을 계산한다.
-
-    입력:
-        X/Y 상대 변위와 digit 한 변 크기
-
-    처리:
-        두 축의 교차 길이를 곱해 하나의 box 면적으로 나눈다.
-
-    출력:
-        `[0, 1]` 범위 bounding-box overlap ratio
-    """
+    """동일 크기 digit box 두 개의 면적 overlap 비율을 계산한다."""
     overlap_width = max(0, digit_size - abs(displacement_x))
     overlap_height = max(0, digit_size - abs(displacement_y))
     return overlap_width * overlap_height / float(digit_size * digit_size)
@@ -435,39 +349,28 @@ def _create_manifest_record(
     direction: tuple[int, int],
     sample_id: int,
     pair_id: int,
-    config: dict[str, Any],
+    config: ExperimentConfig,
     random_generator: np.random.Generator,
     fixed_sources: tuple[int, int] | None = None,
 ) -> tuple[Any, ...]:
-    """하나의 합성 sample에 필요한 manifest record를 계산한다.
-
-    입력:
-        원본 image pool, class별 index, class pair, overlap, 방향, ID와 config
-
-    처리:
-        Source, 정수 변위, offset, box/pixel overlap을 순서대로 결정한다.
-
-    출력:
-        MANIFEST_FIELD_NAMES 순서와 일치하는 tuple record
-    """
+    """하나의 합성 sample에 필요한 manifest record를 계산한다."""
     if fixed_sources is None:
         source_index_first = int(random_generator.choice(source_indices_by_class[class_pair[0]]))
         source_index_second = int(random_generator.choice(source_indices_by_class[class_pair[1]]))
     else:
         source_index_first, source_index_second = fixed_sources
 
-    dataset_config = config["dataset"]
-    digit_size = int(dataset_config["digit_size"])
+    digit_size = config.dataset.digit_size
     displacement_x, displacement_y = _sample_displacement(
         direction,
-        config["overlap"][overlap_level],
+        config.overlap.bounds(overlap_level),
         digit_size,
         random_generator,
     )
     offset_first, offset_second = _centered_offsets(
         displacement_x,
         displacement_y,
-        int(dataset_config["canvas_size"]),
+        config.dataset.canvas_size,
         digit_size,
     )
     box_overlap = bounding_box_overlap_ratio(displacement_x, displacement_y, digit_size)
@@ -476,7 +379,7 @@ def _create_manifest_record(
         source_images[source_index_second],
         offset_first,
         offset_second,
-        float(dataset_config["stroke_threshold"]),
+        config.dataset.stroke_threshold,
     )
     return (
         sample_id,
@@ -499,21 +402,11 @@ def _create_manifest_record(
 
 def _sample_displacement(
     direction: tuple[int, int],
-    overlap_bounds: list[float],
+    overlap_bounds: tuple[float, float],
     digit_size: int,
     random_generator: np.random.Generator,
 ) -> tuple[int, int]:
-    """지정 방향과 overlap 구간을 만족하는 정수 변위를 선택한다.
-
-    입력:
-        정수 방향, overlap 하한/상한, digit 크기, random generator
-
-    처리:
-        가능한 이동 거리를 열거하고 조건을 만족하는 후보에서 하나를 뽑는다.
-
-    출력:
-        `(displacement_x, displacement_y)` 정수 tuple
-    """
+    """지정 방향과 overlap 구간을 만족하는 정수 변위를 후보 중에서 뽑는다."""
     candidates = []
     for distance in range(digit_size):
         displacement_x = direction[0] * distance
@@ -537,17 +430,7 @@ def _centered_offsets(
     canvas_size: int,
     digit_size: int,
 ) -> tuple[tuple[int, int], tuple[int, int]]:
-    """Pair center를 유지하는 두 digit의 정수 top-left offset을 계산한다.
-
-    입력:
-        X/Y 변위, canvas 크기, digit 크기
-
-    처리:
-        중앙 top-left를 기준으로 변위를 절반씩 분배하고 경계를 검사한다.
-
-    출력:
-        First 및 second digit의 `(x, y)` offset tuple
-    """
+    """Pair center를 유지하도록 변위를 절반씩 분배한 두 top-left offset을 계산한다."""
     centered_top_left = (canvas_size - digit_size) // 2
     first_x = centered_top_left - displacement_x // 2
     first_y = centered_top_left - displacement_y // 2
@@ -566,17 +449,7 @@ def _pixel_overlap_ratio(
     offset_second: tuple[int, int],
     stroke_threshold: float,
 ) -> float:
-    """두 digit stroke가 실제로 겹치는 pixel 비율을 계산한다.
-
-    입력:
-        두 uint8 원본 image, 두 offset, `[0, 1]` stroke threshold
-
-    처리:
-        교차 bounding 영역에서 mask intersection을 작은 mask 면적으로 나눈다.
-
-    출력:
-        `[0, 1]` 범위 pixel overlap ratio
-    """
+    """두 digit stroke가 실제로 겹치는 pixel 비율(작은 mask 기준)을 계산한다."""
     threshold_uint8 = stroke_threshold * 255.0
     mask_first = image_first > threshold_uint8
     mask_second = image_second > threshold_uint8
@@ -611,17 +484,7 @@ def _place_image(
     image: torch.Tensor,
     offset: tuple[int, int],
 ) -> None:
-    """원본 image를 canvas의 지정 top-left 위치에 배치한다.
-
-    입력:
-        수정할 canvas, source image, `(x, y)` offset
-
-    처리:
-        Image 높이와 너비에 맞는 canvas slice에 값을 복사한다.
-
-    출력:
-        반환값은 없으며 입력 canvas가 제자리에서 변경된다.
-    """
+    """원본 image를 canvas의 지정 top-left 위치에 제자리 복사한다."""
     offset_x, offset_y = offset
     image_height, image_width = image.shape
     canvas[offset_y:offset_y + image_height, offset_x:offset_x + image_width] = image
@@ -631,17 +494,7 @@ def _group_source_indices_by_class(
     labels: np.ndarray,
     allowed_source_indices: np.ndarray,
 ) -> dict[int, np.ndarray]:
-    """허용된 MNIST source index를 class별로 묶는다.
-
-    입력:
-        전체 source label과 현재 split에서 허용된 index
-
-    처리:
-        각 class label에 해당하는 허용 index를 Boolean mask로 선택한다.
-
-    출력:
-        Class 정수를 key로 갖는 source index array dictionary
-    """
+    """허용된 MNIST source index를 class별로 묶는다."""
     grouped = {}
     for class_value in np.unique(labels):
         class_indices = allowed_source_indices[labels[allowed_source_indices] == class_value]
@@ -661,34 +514,14 @@ def _repeat_and_shuffle(
     requested_count: int,
     random_generator: np.random.Generator,
 ) -> list[Any]:
-    """균형을 유지하도록 값 목록을 반복한 뒤 순서를 섞는다.
-
-    입력:
-        반복할 값 목록, 필요한 총수, random generator
-
-    처리:
-        Modulo index로 빈도 차이를 1 이하로 유지하고 전체 순서를 섞는다.
-
-    출력:
-        requested_count 길이의 shuffled list
-    """
+    """빈도 차이가 1 이하가 되도록 값 목록을 반복한 뒤 순서를 섞는다."""
     repeated = [values[index % len(values)] for index in range(requested_count)]
     random_generator.shuffle(repeated)
     return repeated
 
 
 def _records_to_manifest(records: list[tuple[Any, ...]]) -> dict[str, np.ndarray]:
-    """Record tuple 목록을 field별 typed NumPy array로 변환한다.
-
-    입력:
-        동일한 field 순서를 가진 manifest record 목록
-
-    처리:
-        Column 단위로 전치하고 integer, float, 문자열 dtype을 적용한다.
-
-    출력:
-        저장 가능한 manifest dictionary
-    """
+    """Record tuple 목록을 field별 typed NumPy array로 변환한다."""
     columns = list(zip(*records))
     integer_fields = set(MANIFEST_FIELD_NAMES[:12])
     manifest = {}
@@ -706,19 +539,9 @@ def _validate_manifest(
     manifest: dict[str, np.ndarray],
     split_name: str,
     expected_size: int,
-    config: dict[str, Any],
+    config: ExperimentConfig,
 ) -> None:
-    """하나의 manifest가 split별 데이터 계약을 만족하는지 검사한다.
-
-    입력:
-        Manifest dictionary, split 이름, 기대 sample 수, config
-
-    처리:
-        Field, 길이, label, offset, overlap, class 균형, pairing을 확인한다.
-
-    출력:
-        반환값은 없으며 첫 계약 위반에서 ValueError를 발생시킨다.
-    """
+    """Manifest 하나가 split별 데이터 계약(field, 균형, overlap 범위 등)을 만족하는지 검사한다."""
     missing_fields = set(MANIFEST_FIELD_NAMES).difference(manifest)
     if missing_fields:
         raise ValueError(
@@ -738,7 +561,7 @@ def _validate_manifest(
 
     for overlap_level in OVERLAP_LEVELS:
         level_mask = manifest["overlap_level"] == overlap_level
-        lower_bound, upper_bound = config["overlap"][overlap_level]
+        lower_bound, upper_bound = config.overlap.bounds(overlap_level)
         ratios = manifest["bounding_box_overlap_ratio"][level_mask]
         if not len(ratios) or np.any(ratios < lower_bound) or np.any(ratios > upper_bound):
             raise ValueError(f"{split_name}의 {overlap_level} overlap ratio가 범위를 벗어납니다.")
@@ -752,17 +575,7 @@ def _validate_manifest(
 
 
 def _validate_paired_rows(manifest: dict[str, np.ndarray], split_name: str) -> None:
-    """Validation/test의 세 overlap row가 같은 pair 조건을 공유하는지 검사한다.
-
-    입력:
-        Paired manifest와 오류 메시지에 사용할 split 이름
-
-    처리:
-        Pair별 세 level, source, label, 이동 방향의 동일성을 확인한다.
-
-    출력:
-        반환값은 없으며 pairing 위반에서 ValueError를 발생시킨다.
-    """
+    """Validation/test의 같은 pair_id 세 row가 원본·label·방향을 공유하는지 검사한다."""
     for pair_id in np.unique(manifest["pair_id"]):
         rows = np.flatnonzero(manifest["pair_id"] == pair_id)
         if len(rows) != 3 or set(manifest["overlap_level"][rows]) != set(OVERLAP_LEVELS):
@@ -781,3 +594,100 @@ def _validate_paired_rows(manifest: dict[str, np.ndarray], split_name: str) -> N
         )))
         if len(np.unique(directions, axis=0)) != 1:
             raise ValueError(f"{split_name} pair {pair_id}에서 이동 방향이 변경됩니다.")
+
+
+# -----------------------------------------------------------------------------
+# Dataset
+# -----------------------------------------------------------------------------
+
+
+class ControlledOverlapMnistDataset(Dataset):
+    """Manifest 좌표로 동일한 합성 sample을 필요할 때 재구성하는 Dataset.
+
+    반환 sample: image, multi-hot label, pair metadata, (선택) source별 stroke mask.
+    """
+
+    def __init__(
+        self,
+        split_name: str,
+        config: ExperimentConfig,
+        include_masks: bool = False,
+        manifest_path: Path | None = None,
+        download: bool = False,
+    ) -> None:
+        if split_name not in MANIFEST_PATHS:
+            raise ValueError(f"지원하지 않는 데이터 split입니다: {split_name}")
+
+        self.split_name = split_name
+        self.config = config
+        self.include_masks = include_masks
+        self.manifest = load_manifest(
+            manifest_path or MANIFEST_PATHS[split_name]
+        )
+        self.mnist_dataset = MNIST(
+            RAW_DATA_DIR,
+            train=split_name != "test",
+            download=download,
+        )
+
+    def __len__(self) -> int:
+        return len(self.manifest["sample_id"])
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        source_image_first = self.mnist_dataset.data[
+            int(self.manifest["source_index_first"][index])
+        ].to(torch.float32).div(255.0)
+        source_image_second = self.mnist_dataset.data[
+            int(self.manifest["source_index_second"][index])
+        ].to(torch.float32).div(255.0)
+        offset_first = (
+            int(self.manifest["offset_first_x"][index]),
+            int(self.manifest["offset_first_y"][index]),
+        )
+        offset_second = (
+            int(self.manifest["offset_second_x"][index]),
+            int(self.manifest["offset_second_y"][index]),
+        )
+        rendered = render_overlap_sample(
+            source_image_first,
+            source_image_second,
+            offset_first,
+            offset_second,
+            canvas_size=self.config.dataset.canvas_size,
+            stroke_threshold=self.config.dataset.stroke_threshold,
+        )
+        label_first = int(self.manifest["label_first"][index])
+        label_second = int(self.manifest["label_second"][index])
+        multi_hot_label = torch.zeros(CLASS_COUNT, dtype=torch.float32)
+        multi_hot_label[label_first] = 1.0
+        multi_hot_label[label_second] = 1.0
+        sample: dict[str, Any] = {
+            "image": rendered["image"].unsqueeze(0),
+            "label": multi_hot_label,
+            "label_first": label_first,
+            "label_second": label_second,
+            "sample_id": int(self.manifest["sample_id"][index]),
+            "pair_id": int(self.manifest["pair_id"][index]),
+            "overlap_level": str(self.manifest["overlap_level"][index]),
+            "bounding_box_overlap_ratio": float(
+                self.manifest["bounding_box_overlap_ratio"][index]
+            ),
+            "pixel_overlap_ratio": float(
+                self.manifest["pixel_overlap_ratio"][index]
+            ),
+        }
+
+        if self.include_masks:
+            sample.update(
+                {
+                    name: rendered[name].unsqueeze(0)
+                    for name in (
+                        "mask_first",
+                        "mask_second",
+                        "exclusive_mask_first",
+                        "exclusive_mask_second",
+                    )
+                }
+            )
+
+        return sample

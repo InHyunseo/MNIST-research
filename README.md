@@ -45,7 +45,7 @@ Low/Middle/High sample은 같은 원본 숫자, class 순서, 중심, 이동 방
 | `shared_attention` | 입력당 map 1개 | Spatial attention 자체의 효과 확인 |
 | `class_attention` | Class별 map 10개 | Class-conditional weighting 효과 확인 |
 
-모델 구현은 각각 독립 파일에 있으며 공통 layer만 `models/backbone.py`를 사용한다.
+세 모델과 공통 backbone은 모두 `src/mnist_overlap/models.py`에 있다.
 동일한 seed에서는 세 모델의 공통 layer가 동일하게 초기화된다.
 
 ## 평가
@@ -54,8 +54,9 @@ Low/Middle/High sample은 같은 원본 숫자, class 순서, 중심, 이동 방
 
 - Overlap level별 Top-2 exact-match
 - Macro-F1과 class별 precision/recall
-- High-overlap class-pair accuracy
-- Pair ID 단위 paired bootstrap confidence interval
+- Seed와 Pair ID를 함께 복원추출하는 2단계 hierarchical bootstrap
+- 전체 test 기준 숫자별 recall과 High-overlap class-pair 진단 log
+- Model·seed별 early-stopping 안정성
 - Attention AUPRC, IoU, cross-map selectivity
 - Class attention map permutation
 - Parameter 수와 MAC 추정값
@@ -63,30 +64,22 @@ Low/Middle/High sample은 같은 원본 숫자, class 순서, 중심, 이동 방
 ## 프로젝트 구조
 
 ```text
-configs/                    실험 파라미터
+configs/                    실험 파라미터 (mnist_overlap.yaml)
 src/mnist_overlap/          설치 가능한 Python package
-  configuration.py          YAML 로딩, 검증, 경로 정의
-  data/
-    generation.py           Manifest 생성·검증과 image 합성
-    dataset.py              Manifest 기반 지연 로딩 Dataset
-  models/                   Backbone과 세 비교 모델
-  training/
-    engine.py               Epoch, early stopping, checkpoint
-    runner.py               모델·seed별 학습 실행
-  evaluation/
-    metrics.py              Top-2 분류 지표
-    analysis.py             Prediction, attention, bootstrap, 비용 분석
-    runner.py               모델·seed별 최종 평가 실행
-  reporting/
-    generator.py            Metric 집계와 결과 생성 순서
-    plotter.py              모든 PNG 계산과 시각화 설정
-  pipeline.py               전체 실행 순서
-  cli.py                    단일 command interface
+  config.py                 경로 상수, YAML → dataclass 설정, fingerprint
+  data.py                   Manifest 생성·검증, image 합성, Dataset
+  models.py                 공통 backbone과 세 비교 모델
+  metrics.py                Top-2 분류 지표와 공용 통계 helper
+  training.py               Epoch loop, early stopping, 모델·seed별 학습 실행
+  analysis.py               Attention 지표, hierarchical bootstrap, 비용 분석
+  evaluation.py             Run cache 관리, 최종 평가, 집계 CSV
+  reporting.py              최종 표·figure·Markdown 요약 생성
+  inference.py              Checkpoint 단일 이미지 추론 (배포/ROS2 wrapper 진입점)
+  cli.py                    단일 command interface (전체 pipeline 포함)
 data/                       MNIST 원본과 합성 manifest
-models/checkpoints/         Validation best checkpoint
-logs/                       학습 이력, prediction, metric
+outputs/                    Checkpoint, 학습 이력, run cache, 집계 metric
 results/                    최종 표, 그림, 요약
-scripts/                    전체 실험과 결과 생성 shell command
+scripts/run_all.sh          전체 실험과 결과 생성
 ```
 
 ## 시작하기
@@ -98,23 +91,34 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-학습·평가 로그와 최종 표·그림을 한 번에 생성하려면 다음 명령을 실행한다.
+기존 결과를 지우고 10-seed 최종 실험을 처음 실행할 때는 다음 명령을 사용한다.
+
+```bash
+bash scripts/run_all.sh --overwrite
+```
+
+중간에 종료된 뒤에는 `--overwrite` 없이 같은 명령을 실행한다. 정상 완료된 model·seed는
+건너뛰며 중단된 run만 epoch 1부터 다시 시작한다.
 
 ```bash
 bash scripts/run_all.sh
 ```
 
-계산 단계와 결과 생성을 따로 실행할 수도 있다.
+계산 단계와 결과 생성을 따로 실행할 수도 있다. 설치 후에는 `mnist-overlap` 명령도
+`python -m mnist_overlap`과 동일하게 동작한다.
 
 ```bash
-bash scripts/run_experiment.sh  # 데이터 준비, 전체 모델 학습, 평가
-bash scripts/run_figures.sh     # 저장된 평가 log로 표와 그림 생성
+python -m mnist_overlap experiment  # 데이터 준비, 전체 모델 학습, 평가
+python -m mnist_overlap report      # 저장된 평가 log로 표와 그림 생성
 ```
+
+최종 figure는 통제된 overlap 입력, 분류 성능·효과 크기, attention behavior의 세 파일이다.
+분류와 attention의 sample 단위 수치를 NPZ로 저장하므로 통계와 figure를 바꿀 때 재학습이나
+checkpoint inference를 반복하지 않는다. Raw attention map은 저장하지 않는다.
 
 ## 문서
 
 - [사용 설명서](MANUAL.md)
-- [연구계획 및 실험 설계](OverlapMNIST_revised_plan.md)
 - [실험 결과 요약](results/summary.md)
 - [데이터 디렉터리 설명](data/README.md)
 - [결과 디렉터리 설명](results/README.md)

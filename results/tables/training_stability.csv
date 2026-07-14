@@ -1,0 +1,10 @@
+model,seed,epochs_run,best_epoch,best_validation_exact_match,final_validation_exact_match,reached_maximum_epochs,best_at_final_epoch
+lenet,0,18,15,0.7975975975975976,0.78738739,False,False
+lenet,1,18,15,0.7821821821821822,0.77897898,False,False
+lenet,2,16,13,0.7814814814814814,0.77507508,False,False
+shared_attention,0,19,16,0.7864864864864864,0.78588589,False,False
+shared_attention,1,20,19,0.7727727727727728,0.76926927,True,False
+shared_attention,2,17,14,0.7891891891891892,0.78808809,False,False
+class_attention,0,17,14,0.7886886886886887,0.78008008,False,False
+class_attention,1,20,20,0.7933933933933934,0.79339339,True,True
+class_attention,2,19,16,0.8095095095095095,0.8034034,False,False
