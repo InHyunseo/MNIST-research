@@ -1,0 +1,5 @@
+baseline_config: configs/mnist_overlap.yaml
+
+reconstruction:
+  pilot_seed: 0
+  loss_weight_candidates: [0.05, 0.1, 0.2]

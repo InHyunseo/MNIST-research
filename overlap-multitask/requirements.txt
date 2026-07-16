@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch==2.4.1+cu121
+torchvision==0.19.1+cu121
+numpy>=1.26,<2
+PyYAML>=6,<7
+matplotlib>=3.8,<4

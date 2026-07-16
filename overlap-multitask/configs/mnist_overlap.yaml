@@ -1,0 +1,21 @@
+data:
+  seed: 2026
+  train_samples: 60000
+  validation_pairs: 3330
+  test_pairs: 10000
+
+overlap:
+  low: [0.15, 0.30]
+  middle: [0.45, 0.60]
+  high: [0.75, 0.90]
+
+training:
+  seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  maximum_epochs: 30
+  batch_size: 128
+  learning_rate: 0.001
+  early_stopping_patience: 3
+  early_stopping_minimum_delta: 0.001
+
+evaluation:
+  bootstrap_iterations: 5000
