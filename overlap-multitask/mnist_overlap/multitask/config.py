@@ -14,22 +14,24 @@ from ..config import PROJECT_ROOT, ExperimentConfig, config_fingerprint, load_co
 
 
 DEFAULT_MULTITASK_CONFIG_PATH = PROJECT_ROOT / "configs" / "mnist_multitask.yaml"
-MULTITASK_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "multitask"
+MULTITASK_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "multitask_unet"
 PILOT_OUTPUT_DIR = MULTITASK_OUTPUT_DIR / "pilot"
 PILOT_SELECTION_PATH = PILOT_OUTPUT_DIR / "selection.json"
 CHECKPOINT_DIR = MULTITASK_OUTPUT_DIR / "checkpoints"
 TRAINING_LOG_DIR = MULTITASK_OUTPUT_DIR / "training"
-RESULTS_DIR = PROJECT_ROOT / "results" / "multitask"
+RESULTS_DIR = PROJECT_ROOT / "results" / "multitask_unet"
 FIGURE_DIR = RESULTS_DIR / "figures"
 METRICS_JSON_PATH = RESULTS_DIR / "metrics.json"
 PILOT_SEED = 0
 LOSS_WEIGHT_CANDIDATES = (0.05, 0.1, 0.2)
 
 DECODER_CONTRACT = {
-    "feature_shape": [16, 16, 16],
-    "projection_width": 256,
-    "projected_shape": [16, 7, 7],
-    "output_shape": [2, 28, 28],
+    "architecture": "lenet_encoder_unet_expansive_path_v2",
+    "skip_shapes": [[6, 72, 72], [16, 32, 32]],
+    "bottleneck_shape": [16, 16, 16],
+    "decoder_channels": [32, 16, 6],
+    "output_shape": [2, 64, 64],
+    "target": "center_cropped_spatial_source_layers",
     "loss": "intensity_balanced_pit_l1",
 }
 

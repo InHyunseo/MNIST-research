@@ -22,6 +22,7 @@ from ..metrics import (
 )
 from .config import CHECKPOINT_DIR, METRICS_JSON_PATH, MultitaskConfig
 from .losses import (
+    foreground_dice_per_sample,
     match_reconstructions_to_sources,
     permutation_invariant_reconstruction_loss,
 )
@@ -39,7 +40,13 @@ METADATA_FIELD_NAMES = (
     "bounding_box_overlap_ratio",
     "pixel_overlap_ratio",
 )
-RECONSTRUCTION_METRIC_NAMES = ("balanced_l1", "l1", "mse", "psnr")
+RECONSTRUCTION_METRIC_NAMES = (
+    "foreground_dice",
+    "balanced_l1",
+    "l1",
+    "mse",
+    "psnr",
+)
 
 
 class MultitaskPredictor:
@@ -106,18 +113,29 @@ class MultitaskPredictor:
         for batch in test_loader:
             images = batch["image"].to(self.device)
             source_images = batch["source_images"].to(self.device)
+            reconstruction_targets = batch["reconstruction_targets"].to(self.device)
+            source_offsets = batch["source_offsets"].to(self.device)
             output = model(images)
             pit_result = permutation_invariant_reconstruction_loss(
-                output.reconstructions, source_images
+                output.reconstructions, reconstruction_targets
             )
             matched_reconstructions = match_reconstructions_to_sources(
                 output.reconstructions, pit_result.swapped
             )
-            absolute_error = torch.abs(matched_reconstructions - source_images)
-            squared_error = torch.square(matched_reconstructions - source_images)
+            cropped_reconstructions = crop_source_images(
+                matched_reconstructions,
+                source_offsets,
+                source_images.shape[-1],
+            )
+            absolute_error = torch.abs(cropped_reconstructions - source_images)
+            squared_error = torch.square(cropped_reconstructions - source_images)
             l1_per_sample = absolute_error.mean(dim=(1, 2, 3))
             mse_per_sample = squared_error.mean(dim=(1, 2, 3))
             psnr_per_sample = -10.0 * torch.log10(mse_per_sample.clamp_min(1e-12))
+            dice_per_sample = foreground_dice_per_sample(
+                matched_reconstructions,
+                reconstruction_targets,
+            )
 
             collected_columns["logits"].append(output.logits.cpu().numpy())
             collected_columns["labels"].append(batch["label"].numpy())
@@ -126,6 +144,9 @@ class MultitaskPredictor:
             )
             collected_columns["balanced_l1"].append(
                 pit_result.per_sample_loss.cpu().numpy()
+            )
+            collected_columns["foreground_dice"].append(
+                dice_per_sample.cpu().numpy()
             )
             collected_columns["l1"].append(l1_per_sample.cpu().numpy())
             collected_columns["mse"].append(mse_per_sample.cpu().numpy())
@@ -187,7 +208,7 @@ class ComparisonEvaluator:
         return {
             "models": {
                 "baseline": "MnistONet",
-                "multitask": "MnistONet+ReconstructionDecoder",
+                "multitask": "MnistONet+UNetDecoder",
             },
             "training_seeds": training_seeds,
             "reconstruction_loss_weight": reconstruction_loss_weight,
@@ -221,7 +242,8 @@ class ComparisonEvaluator:
         high_reconstruction = metrics["reconstruction_performance"]["high"]
         print(
             "\n[Multitask reconstruction — High] "
-            f"L1={high_reconstruction['l1_mean']:.4f}, "
+            f"Dice={high_reconstruction['foreground_dice_mean']:.4f}, "
+            f"crop-L1={high_reconstruction['l1_mean']:.4f}, "
             f"PSNR={high_reconstruction['psnr_mean']:.2f} dB"
         )
 
@@ -375,7 +397,9 @@ class ComparisonEvaluator:
                 )
                 matrix = np.zeros((len(pair_labels), len(pair_labels)), dtype=np.float64)
                 for true_pair, predicted_pair in zip(true_pairs, predicted_pairs):
-                    matrix[pair_lookup[tuple(true_pair)]][pair_lookup[tuple(predicted_pair)]] += 1.0
+                    true_index = pair_lookup[tuple(true_pair)]
+                    predicted_index = pair_lookup[tuple(predicted_pair)]
+                    matrix[true_index][predicted_index] += 1.0
                 row_sums = matrix.sum(axis=1, keepdims=True)
                 np.divide(matrix, row_sums, out=matrix, where=row_sums != 0)
                 matrices.append(matrix)
@@ -392,7 +416,7 @@ class ComparisonEvaluator:
         predictions_by_seed: dict[int, dict[str, np.ndarray]],
         training_seeds: list[int],
     ) -> dict[str, dict[str, float]]:
-        """전체·overlap별 네 복원 지표의 seed 평균·표본 std를 계산한다."""
+        """전체·overlap별 다섯 복원 지표의 seed 평균·표본 std를 계산한다."""
         performance = {}
         for level in ("all", *OVERLAP_LEVELS):
             entry = {}
@@ -457,3 +481,43 @@ class ComparisonEvaluator:
             [None if not np.isfinite(value) else float(value) for value in row]
             for row in matrix
         ]
+
+
+def crop_source_images(
+    matched_reconstructions: torch.Tensor,
+    source_offsets: torch.Tensor,
+    source_size: int,
+) -> torch.Tensor:
+    """각 source의 target 좌표에서 `source_size×source_size` patch를 모은다."""
+    if matched_reconstructions.ndim != 4 or matched_reconstructions.shape[1] != 2:
+        raise ValueError("복원 결과는 `[batch,2,height,width]` 형태여야 합니다.")
+    expected_offset_shape = (matched_reconstructions.shape[0], 2, 2)
+    if tuple(source_offsets.shape) != expected_offset_shape:
+        raise ValueError("Source offset은 `[batch,2,2]` 형태여야 합니다.")
+
+    maximum_y = matched_reconstructions.shape[-2] - source_size
+    maximum_x = matched_reconstructions.shape[-1] - source_size
+    offset_x = source_offsets[..., 0]
+    offset_y = source_offsets[..., 1]
+    if (
+        torch.any(offset_x < 0)
+        or torch.any(offset_x > maximum_x)
+        or torch.any(offset_y < 0)
+        or torch.any(offset_y > maximum_y)
+    ):
+        raise ValueError("Source crop이 reconstruction 범위를 벗어납니다.")
+
+    sliding_patches = matched_reconstructions.unfold(2, source_size, 1).unfold(
+        3, source_size, 1
+    )
+    batch_indices = torch.arange(
+        matched_reconstructions.shape[0],
+        device=matched_reconstructions.device,
+    ).unsqueeze(1)
+    source_indices = torch.arange(2, device=matched_reconstructions.device).unsqueeze(0)
+    return sliding_patches[
+        batch_indices,
+        source_indices,
+        offset_y,
+        offset_x,
+    ]

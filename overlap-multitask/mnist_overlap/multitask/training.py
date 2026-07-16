@@ -66,13 +66,13 @@ def train_one_epoch(
     for batch in data_loader:
         images = batch["image"].to(device)
         labels = batch["label"].to(device)
-        source_images = batch["source_images"].to(device)
+        reconstruction_targets = batch["reconstruction_targets"].to(device)
 
         optimizer.zero_grad(set_to_none=True)
         output = model(images)
         classification_loss = classification_loss_function(output.logits, labels)
         pit_result = permutation_invariant_reconstruction_loss(
-            output.reconstructions, source_images
+            output.reconstructions, reconstruction_targets
         )
         total_loss = classification_loss + reconstruction_loss_weight * pit_result.loss
         if not torch.isfinite(total_loss):
@@ -108,11 +108,11 @@ def evaluate_validation(
     for batch in data_loader:
         images = batch["image"].to(device)
         labels = batch["label"].to(device)
-        source_images = batch["source_images"].to(device)
+        reconstruction_targets = batch["reconstruction_targets"].to(device)
         output = model(images)
         classification_loss = classification_loss_function(output.logits, labels)
         pit_result = permutation_invariant_reconstruction_loss(
-            output.reconstructions, source_images
+            output.reconstructions, reconstruction_targets
         )
         total_loss = classification_loss + reconstruction_loss_weight * pit_result.loss
 

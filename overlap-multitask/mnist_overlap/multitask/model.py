@@ -1,4 +1,4 @@
-"""공통 LeNet에 원본 숫자 두 장을 복원하는 decoder를 결합한다."""
+"""공통 LeNet encoder에 U-Net expansive path를 결합한다."""
 
 from __future__ import annotations
 
@@ -19,29 +19,73 @@ class MultitaskOutput:
 
 
 class ReconstructionDecoder(nn.Module):
-    """LeNet spatial feature를 두 장의 `28×28` grayscale 이미지로 복원한다."""
+    """LeNet의 세 해상도를 연결해 두 장의 `64×64` source layer를 분리한다.
+
+    원 U-Net의 `up-convolution → encoder feature concat → double convolution`
+    순서를 두 해상도에 적용한다. LeNet 분류 구조를 보존해야 하므로 contracting
+    path의 channel 수와 convolution은 기존 LeNet을 그대로 사용한다.
+    """
 
     def __init__(self) -> None:
         super().__init__()
-        self.project = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(4096, 256),
+        self.bottleneck = DoubleConvolution(16, 32)
+        self.up_middle = nn.ConvTranspose2d(32, 16, kernel_size=2, stride=2)
+        self.refine_middle = DoubleConvolution(32, 16)
+        self.up_high = nn.ConvTranspose2d(16, 6, kernel_size=2, stride=2)
+        self.refine_high = DoubleConvolution(12, 6)
+        self.output = nn.Conv2d(6, 2, kernel_size=1)
+
+    def forward(
+        self,
+        high_resolution: torch.Tensor,
+        middle_resolution: torch.Tensor,
+        bottleneck: torch.Tensor,
+    ) -> torch.Tensor:
+        """LeNet feature tuple을 `[batch,2,64,64]` source layer로 변환한다."""
+        decoded_middle = self.up_middle(self.bottleneck(bottleneck))
+        decoded_middle = self.refine_middle(torch.cat(
+            (decoded_middle, middle_resolution),
+            dim=1,
+        ))
+
+        decoded_high = self.up_high(decoded_middle)
+        cropped_high_resolution = center_crop_like(high_resolution, decoded_high)
+        decoded_high = self.refine_high(torch.cat(
+            (decoded_high, cropped_high_resolution),
+            dim=1,
+        ))
+        return torch.sigmoid(self.output(decoded_high))
+
+
+class DoubleConvolution(nn.Sequential):
+    """U-Net expansive path의 연속된 `3×3 convolution + ReLU` 두 회."""
+
+    def __init__(self, input_channels: int, output_channels: int) -> None:
+        super().__init__(
+            nn.Conv2d(input_channels, output_channels, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Linear(256, 16 * 7 * 7),
+            nn.Conv2d(output_channels, output_channels, kernel_size=3, padding=1),
             nn.ReLU(),
-        )
-        self.decode = nn.Sequential(
-            nn.ConvTranspose2d(16, 8, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(8, 2, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid(),
         )
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """`[batch,16,16,16]` feature를 `[batch,2,28,28]` 복원으로 변환한다."""
-        projected_features = self.project(features)
-        spatial_features = projected_features.reshape(features.shape[0], 16, 7, 7)
-        return self.decode(spatial_features)
+
+def center_crop_like(
+    features: torch.Tensor,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """U-Net skip feature를 reference의 spatial shape에 맞춰 중앙 crop한다."""
+    target_height, target_width = reference.shape[-2:]
+    source_height, source_width = features.shape[-2:]
+    if source_height < target_height or source_width < target_width:
+        raise ValueError("Skip feature가 decoder feature보다 작아 중앙 crop할 수 없습니다.")
+    start_y = (source_height - target_height) // 2
+    start_x = (source_width - target_width) // 2
+    return features[
+        :,
+        :,
+        start_y:start_y + target_height,
+        start_x:start_x + target_width,
+    ]
 
 
 class MultitaskMnistONet(nn.Module):
@@ -55,7 +99,13 @@ class MultitaskMnistONet(nn.Module):
 
     def forward(self, images: torch.Tensor) -> MultitaskOutput:
         """겹친 입력을 동시에 분류하고 두 원본 숫자를 복원한다."""
-        features = self.classifier.encode(images)
-        logits = self.classifier.classify_features(features)
-        reconstructions = self.decoder(features)
+        high_resolution, middle_resolution, bottleneck = (
+            self.classifier.encode_with_skips(images)
+        )
+        logits = self.classifier.classify_features(bottleneck)
+        reconstructions = self.decoder(
+            high_resolution,
+            middle_resolution,
+            bottleneck,
+        )
         return MultitaskOutput(logits, reconstructions)

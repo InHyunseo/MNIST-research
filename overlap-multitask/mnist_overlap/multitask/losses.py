@@ -45,20 +45,28 @@ def intensity_balanced_l1_distance(
 
 def permutation_invariant_reconstruction_loss(
     reconstructions: torch.Tensor,
-    source_images: torch.Tensor,
+    reconstruction_targets: torch.Tensor,
 ) -> PitLossResult:
     """두 assignment의 balanced L1을 sample별로 비교해 더 작은 값을 선택한다."""
-    expected_shape = (reconstructions.shape[0], 2, 28, 28)
-    if reconstructions.shape != source_images.shape or reconstructions.shape != expected_shape:
-        raise ValueError("PIT 입력은 같은 `[batch,2,28,28]` 형태여야 합니다.")
+    valid_shape = reconstructions.ndim == 4 and reconstructions.shape[1] == 2
+    if reconstructions.shape != reconstruction_targets.shape or not valid_shape:
+        raise ValueError("PIT 입력은 같은 `[batch,2,height,width]` 형태여야 합니다.")
 
     direct_loss = (
-        intensity_balanced_l1_distance(reconstructions[:, 0], source_images[:, 0])
-        + intensity_balanced_l1_distance(reconstructions[:, 1], source_images[:, 1])
+        intensity_balanced_l1_distance(
+            reconstructions[:, 0], reconstruction_targets[:, 0]
+        )
+        + intensity_balanced_l1_distance(
+            reconstructions[:, 1], reconstruction_targets[:, 1]
+        )
     )
     swapped_loss = (
-        intensity_balanced_l1_distance(reconstructions[:, 0], source_images[:, 1])
-        + intensity_balanced_l1_distance(reconstructions[:, 1], source_images[:, 0])
+        intensity_balanced_l1_distance(
+            reconstructions[:, 0], reconstruction_targets[:, 1]
+        )
+        + intensity_balanced_l1_distance(
+            reconstructions[:, 1], reconstruction_targets[:, 0]
+        )
     )
     swapped = swapped_loss < direct_loss
     per_sample_loss = torch.where(swapped, swapped_loss, direct_loss)
@@ -73,3 +81,28 @@ def match_reconstructions_to_sources(
     swapped_reconstructions = reconstructions[:, [1, 0]]
     swap_mask = swapped.reshape(-1, 1, 1, 1)
     return torch.where(swap_mask, swapped_reconstructions, reconstructions)
+
+
+def foreground_dice_per_sample(
+    matched_reconstructions: torch.Tensor,
+    reconstruction_targets: torch.Tensor,
+) -> torch.Tensor:
+    """두 source layer의 soft foreground Dice를 sample별 평균한다."""
+    if (
+        matched_reconstructions.shape != reconstruction_targets.shape
+        or matched_reconstructions.ndim != 4
+        or matched_reconstructions.shape[1] != 2
+    ):
+        raise ValueError("Dice 입력은 같은 `[batch,2,height,width]` 형태여야 합니다.")
+    spatial_dimensions = (2, 3)
+    intersection = (
+        matched_reconstructions * reconstruction_targets
+    ).sum(dim=spatial_dimensions)
+    denominator = (
+        torch.square(matched_reconstructions).sum(dim=spatial_dimensions)
+        + torch.square(reconstruction_targets).sum(dim=spatial_dimensions)
+    )
+    dice_by_source = (2.0 * intersection + LOSS_EPSILON) / (
+        denominator + LOSS_EPSILON
+    )
+    return dice_by_source.mean(dim=1)

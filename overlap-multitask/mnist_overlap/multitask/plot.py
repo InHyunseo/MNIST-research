@@ -16,6 +16,7 @@ from ..config import CLASS_COUNT, OVERLAP_LEVELS
 from ..data import ControlledOverlapMnistDataset
 from ..training_plot import draw_training_curves
 from .config import FIGURE_DIR, TRAINING_LOG_DIR
+from .evaluation import crop_source_images
 from .losses import (
     match_reconstructions_to_sources,
     permutation_invariant_reconstruction_loss,
@@ -218,20 +219,27 @@ class ComparisonVisualizer:
         ):
             sample = test_dataset[dataset_index]
             images = sample["image"].unsqueeze(0).to(device)
-            source_images = sample["source_images"].unsqueeze(0).to(device)
+            reconstruction_targets = sample["reconstruction_targets"].unsqueeze(0).to(
+                device
+            )
             output = model(images)
             pit_result = permutation_invariant_reconstruction_loss(
-                output.reconstructions, source_images
+                output.reconstructions, reconstruction_targets
             )
             matched = match_reconstructions_to_sources(
                 output.reconstructions, pit_result.swapped
+            )
+            cropped_reconstructions = crop_source_images(
+                matched,
+                sample["source_offsets"].unsqueeze(0).to(device),
+                sample["source_images"].shape[-1],
             )[0].cpu()
             displayed_images = (
                 sample["image"][0],
                 sample["source_images"][0],
                 sample["source_images"][1],
-                matched[0],
-                matched[1],
+                cropped_reconstructions[0],
+                cropped_reconstructions[1],
             )
 
             for column_index, displayed_image in enumerate(displayed_images):

@@ -9,7 +9,10 @@ from tempfile import TemporaryDirectory
 import torch
 
 from mnist_overlap.config import CHECKPOINT_DIR as BASELINE_CHECKPOINT_DIR
-from mnist_overlap.data import ControlledOverlapMnistDataset
+from mnist_overlap.data import (
+    RECONSTRUCTION_SIZE,
+    ControlledOverlapMnistDataset,
+)
 from mnist_overlap.model import MnistONet
 from mnist_overlap.multitask.config import (
     CHECKPOINT_DIR as MULTITASK_CHECKPOINT_DIR,
@@ -17,7 +20,11 @@ from mnist_overlap.multitask.config import (
     load_multitask_config,
     multitask_config_fingerprint,
 )
-from mnist_overlap.multitask.losses import permutation_invariant_reconstruction_loss
+from mnist_overlap.multitask.evaluation import crop_source_images
+from mnist_overlap.multitask.losses import (
+    foreground_dice_per_sample,
+    permutation_invariant_reconstruction_loss,
+)
 from mnist_overlap.multitask.model import MultitaskMnistONet
 from mnist_overlap.multitask.training import (
     load_checkpoint,
@@ -61,19 +68,47 @@ class DatasetContractTest(unittest.TestCase):
         )[0]
         self.assertNotIn("source_images", baseline_sample)
         self.assertEqual(tuple(multitask_sample["source_images"].shape), (2, 28, 28))
+        self.assertEqual(
+            tuple(multitask_sample["reconstruction_targets"].shape),
+            (2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE),
+        )
+        self.assertEqual(tuple(multitask_sample["source_offsets"].shape), (2, 2))
         self.assertTrue(torch.equal(baseline_sample["image"], multitask_sample["image"]))
         self.assertTrue(torch.equal(baseline_sample["label"], multitask_sample["label"]))
+
+        recovered_sources = crop_source_images(
+            multitask_sample["reconstruction_targets"].unsqueeze(0),
+            multitask_sample["source_offsets"].unsqueeze(0),
+            28,
+        )[0]
+        self.assertTrue(torch.equal(recovered_sources, multitask_sample["source_images"]))
 
 
 class MultitaskModelTest(unittest.TestCase):
     """Decoder shape·초기화와 두 loss의 gradient 경로를 검사한다."""
 
+    def test_encoder_skip_shapes_match_unet_contract(self) -> None:
+        features = MnistONet().encode_with_skips(torch.rand(2, 1, 76, 76))
+        self.assertEqual(tuple(features[0].shape), (2, 6, 72, 72))
+        self.assertEqual(tuple(features[1].shape), (2, 16, 32, 32))
+        self.assertEqual(tuple(features[2].shape), (2, 16, 16, 16))
+
     def test_output_shape_and_range(self) -> None:
         output = MultitaskMnistONet()(torch.rand(2, 1, 76, 76))
         self.assertEqual(tuple(output.logits.shape), (2, 10))
-        self.assertEqual(tuple(output.reconstructions.shape), (2, 2, 28, 28))
+        self.assertEqual(
+            tuple(output.reconstructions.shape),
+            (2, 2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE),
+        )
         self.assertGreaterEqual(float(output.reconstructions.min()), 0.0)
         self.assertLessEqual(float(output.reconstructions.max()), 1.0)
+
+    def test_decoder_is_fully_convolutional(self) -> None:
+        decoder = MultitaskMnistONet().decoder
+        self.assertFalse(any(
+            isinstance(module, (torch.nn.Flatten, torch.nn.Linear))
+            for module in decoder.modules()
+        ))
 
     def test_classifier_initialization_matches_baseline_for_same_seed(self) -> None:
         set_random_seed(7)
@@ -90,15 +125,19 @@ class MultitaskModelTest(unittest.TestCase):
     def test_reconstruction_and_classification_gradient_routes(self) -> None:
         model = MultitaskMnistONet()
         images = torch.rand(2, 1, 76, 76)
-        source_images = torch.rand(2, 2, 28, 28)
+        reconstruction_targets = torch.rand(
+            2, 2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE
+        )
         output = model(images)
         reconstruction_loss = permutation_invariant_reconstruction_loss(
-            output.reconstructions, source_images
+            output.reconstructions, reconstruction_targets
         ).loss
         reconstruction_loss.backward()
         self.assertIsNotNone(model.classifier.layers[0].weight.grad)
         self.assertIsNone(model.classifier.layers[7].weight.grad)
-        self.assertTrue(any(parameter.grad is not None for parameter in model.decoder.parameters()))
+        self.assertTrue(any(
+            parameter.grad is not None for parameter in model.decoder.parameters()
+        ))
 
         model.zero_grad(set_to_none=True)
         output = model(images)
@@ -115,18 +154,32 @@ class ReconstructionLossTest(unittest.TestCase):
     """Balanced PIT loss의 순서 불변성과 blank 억제 성질을 검사한다."""
 
     def test_pit_is_invariant_to_output_channel_swap(self) -> None:
-        source_images = torch.zeros(2, 2, 28, 28)
-        source_images[:, 0, 4:12, 5:13] = 1.0
-        source_images[:, 1, 15:23, 16:24] = 0.8
-        direct = permutation_invariant_reconstruction_loss(source_images, source_images)
+        reconstruction_targets = torch.zeros(
+            2, 2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE
+        )
+        reconstruction_targets[:, 0, 4:12, 5:13] = 1.0
+        reconstruction_targets[:, 1, 15:23, 16:24] = 0.8
+        direct = permutation_invariant_reconstruction_loss(
+            reconstruction_targets, reconstruction_targets
+        )
         swapped = permutation_invariant_reconstruction_loss(
-            source_images[:, [1, 0]], source_images
+            reconstruction_targets[:, [1, 0]], reconstruction_targets
         )
         blank = permutation_invariant_reconstruction_loss(
-            torch.zeros_like(source_images), source_images
+            torch.zeros_like(reconstruction_targets), reconstruction_targets
         )
         self.assertAlmostEqual(float(direct.loss), float(swapped.loss), places=7)
         self.assertGreater(float(blank.loss), float(direct.loss))
+        perfect_dice = foreground_dice_per_sample(
+            reconstruction_targets,
+            reconstruction_targets,
+        )
+        blank_dice = foreground_dice_per_sample(
+            torch.zeros_like(reconstruction_targets),
+            reconstruction_targets,
+        )
+        self.assertTrue(torch.allclose(perfect_dice, torch.ones_like(perfect_dice)))
+        self.assertTrue(torch.all(blank_dice < perfect_dice))
 
     def test_pilot_tie_break_prefers_smallest_weight_within_tolerance(self) -> None:
         candidates = [

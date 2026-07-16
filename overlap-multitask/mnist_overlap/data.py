@@ -12,7 +12,17 @@ from torchvision.datasets import MNIST
 from .config import CLASS_COUNT, RAW_DATA_DIR
 from .manifest import CANVAS_SIZE, MANIFEST_PATHS, load_manifest, prepare_data
 
-__all__ = ("ControlledOverlapMnistDataset", "prepare_data", "render_overlap_sample")
+RECONSTRUCTION_SIZE = 64
+RECONSTRUCTION_CROP_START = (CANVAS_SIZE - RECONSTRUCTION_SIZE) // 2
+
+__all__ = (
+    "ControlledOverlapMnistDataset",
+    "RECONSTRUCTION_CROP_START",
+    "RECONSTRUCTION_SIZE",
+    "prepare_data",
+    "render_overlap_sample",
+    "render_reconstruction_targets",
+)
 
 
 def render_overlap_sample(
@@ -30,6 +40,35 @@ def render_overlap_sample(
     return torch.maximum(canvas_first, canvas_second)
 
 
+def render_reconstruction_targets(
+    source_image_first: torch.Tensor,
+    source_image_second: torch.Tensor,
+    offset_first: tuple[int, int],
+    offset_second: tuple[int, int],
+) -> torch.Tensor:
+    """입력 좌표를 유지한 두 source layer의 중앙 `64×64` target을 만든다."""
+    for offset, source_image in (
+        (offset_first, source_image_first),
+        (offset_second, source_image_second),
+    ):
+        shifted_x = offset[0] - RECONSTRUCTION_CROP_START
+        shifted_y = offset[1] - RECONSTRUCTION_CROP_START
+        if not (
+            0 <= shifted_x <= RECONSTRUCTION_SIZE - source_image.shape[1]
+            and 0 <= shifted_y <= RECONSTRUCTION_SIZE - source_image.shape[0]
+        ):
+            raise ValueError("Source image가 reconstruction target crop을 벗어납니다.")
+    source_layers = torch.zeros((2, CANVAS_SIZE, CANVAS_SIZE), dtype=torch.float32)
+    _place_image(source_layers[0], source_image_first, offset_first)
+    _place_image(source_layers[1], source_image_second, offset_second)
+    crop_start = RECONSTRUCTION_CROP_START
+    crop_end = crop_start + RECONSTRUCTION_SIZE
+    cropped_layers = source_layers[:, crop_start:crop_end, crop_start:crop_end]
+    if tuple(cropped_layers.shape) != (2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE):
+        raise RuntimeError("Reconstruction target crop shape가 올바르지 않습니다.")
+    return cropped_layers
+
+
 def _place_image(
     canvas: torch.Tensor,
     image: torch.Tensor,
@@ -44,7 +83,8 @@ def _place_image(
 class ControlledOverlapMnistDataset(Dataset):
     """Manifest 좌표로 동일한 합성 sample을 지연 재구성한다.
 
-    `include_source_images=True`일 때만 multitask target `[2,28,28]`을 추가한다.
+    `include_source_images=True`일 때만 원본 `[2,28,28]`, 입력 좌표의 복원 target
+    `[2,64,64]`와 target 안의 top-left 좌표 `[2,2]`를 추가한다.
     """
 
     def __init__(
@@ -99,6 +139,25 @@ class ControlledOverlapMnistDataset(Dataset):
         if self.include_source_images:
             sample["source_images"] = torch.stack(
                 (source_image_first, source_image_second)
+            )
+            sample["reconstruction_targets"] = render_reconstruction_targets(
+                source_image_first,
+                source_image_second,
+                offset_first,
+                offset_second,
+            )
+            sample["source_offsets"] = torch.tensor(
+                (
+                    (
+                        offset_first[0] - RECONSTRUCTION_CROP_START,
+                        offset_first[1] - RECONSTRUCTION_CROP_START,
+                    ),
+                    (
+                        offset_second[0] - RECONSTRUCTION_CROP_START,
+                        offset_second[1] - RECONSTRUCTION_CROP_START,
+                    ),
+                ),
+                dtype=torch.int64,
             )
         return sample
 
