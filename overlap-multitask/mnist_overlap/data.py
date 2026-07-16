@@ -21,7 +21,7 @@ __all__ = (
     "RECONSTRUCTION_SIZE",
     "prepare_data",
     "render_overlap_sample",
-    "render_reconstruction_targets",
+    "render_semantic_targets",
 )
 
 
@@ -40,13 +40,17 @@ def render_overlap_sample(
     return torch.maximum(canvas_first, canvas_second)
 
 
-def render_reconstruction_targets(
+def render_semantic_targets(
     source_image_first: torch.Tensor,
     source_image_second: torch.Tensor,
     offset_first: tuple[int, int],
     offset_second: tuple[int, int],
+    label_first: int,
+    label_second: int,
 ) -> torch.Tensor:
-    """입력 좌표를 유지한 두 source layer의 중앙 `64×64` target을 만든다."""
+    """두 source를 해당 class channel에 배치한 `[10,64,64]` target을 만든다."""
+    if label_first == label_second:
+        raise ValueError("Semantic target은 서로 다른 두 class를 전제로 합니다.")
     for offset, source_image in (
         (offset_first, source_image_first),
         (offset_second, source_image_second),
@@ -66,7 +70,13 @@ def render_reconstruction_targets(
     cropped_layers = source_layers[:, crop_start:crop_end, crop_start:crop_end]
     if tuple(cropped_layers.shape) != (2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE):
         raise RuntimeError("Reconstruction target crop shape가 올바르지 않습니다.")
-    return cropped_layers
+    semantic_targets = torch.zeros(
+        (CLASS_COUNT, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE),
+        dtype=torch.float32,
+    )
+    semantic_targets[label_first] = cropped_layers[0]
+    semantic_targets[label_second] = cropped_layers[1]
+    return semantic_targets
 
 
 def _place_image(
@@ -83,8 +93,8 @@ def _place_image(
 class ControlledOverlapMnistDataset(Dataset):
     """Manifest 좌표로 동일한 합성 sample을 지연 재구성한다.
 
-    `include_source_images=True`일 때만 원본 `[2,28,28]`, 입력 좌표의 복원 target
-    `[2,64,64]`와 target 안의 top-left 좌표 `[2,2]`를 추가한다.
+    `include_source_images=True`일 때만 원본 `[2,28,28]`, class별 semantic target
+    `[10,64,64]`와 target 안의 top-left 좌표 `[2,2]`를 추가한다.
     """
 
     def __init__(
@@ -140,11 +150,13 @@ class ControlledOverlapMnistDataset(Dataset):
             sample["source_images"] = torch.stack(
                 (source_image_first, source_image_second)
             )
-            sample["reconstruction_targets"] = render_reconstruction_targets(
+            sample["reconstruction_targets"] = render_semantic_targets(
                 source_image_first,
                 source_image_second,
                 offset_first,
                 offset_second,
+                label_first,
+                label_second,
             )
             sample["source_offsets"] = torch.tensor(
                 (

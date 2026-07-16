@@ -24,7 +24,7 @@ from .config import (
     multitask_config_fingerprint,
     pilot_weight_directory,
 )
-from .losses import permutation_invariant_reconstruction_loss
+from .losses import semantic_reconstruction_loss
 from .model import MultitaskMnistONet
 
 
@@ -71,10 +71,14 @@ def train_one_epoch(
         optimizer.zero_grad(set_to_none=True)
         output = model(images)
         classification_loss = classification_loss_function(output.logits, labels)
-        pit_result = permutation_invariant_reconstruction_loss(
-            output.reconstructions, reconstruction_targets
+        reconstruction_result = semantic_reconstruction_loss(
+            output.reconstruction_logits,
+            reconstruction_targets,
         )
-        total_loss = classification_loss + reconstruction_loss_weight * pit_result.loss
+        total_loss = (
+            classification_loss
+            + reconstruction_loss_weight * reconstruction_result.loss
+        )
         if not torch.isfinite(total_loss):
             raise FloatingPointError(f"유한하지 않은 training loss입니다: {total_loss.item()}")
         total_loss.backward()
@@ -85,7 +89,7 @@ def train_one_epoch(
             images.shape[0],
             total_loss,
             classification_loss,
-            pit_result.loss,
+            reconstruction_result.loss,
             output.logits.detach(),
             labels,
         )
@@ -111,17 +115,21 @@ def evaluate_validation(
         reconstruction_targets = batch["reconstruction_targets"].to(device)
         output = model(images)
         classification_loss = classification_loss_function(output.logits, labels)
-        pit_result = permutation_invariant_reconstruction_loss(
-            output.reconstructions, reconstruction_targets
+        reconstruction_result = semantic_reconstruction_loss(
+            output.reconstruction_logits,
+            reconstruction_targets,
         )
-        total_loss = classification_loss + reconstruction_loss_weight * pit_result.loss
+        total_loss = (
+            classification_loss
+            + reconstruction_loss_weight * reconstruction_result.loss
+        )
 
         _accumulate_epoch_totals(
             totals,
             images.shape[0],
             total_loss,
             classification_loss,
-            pit_result.loss,
+            reconstruction_result.loss,
             output.logits,
             labels,
         )

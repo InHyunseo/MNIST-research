@@ -26,13 +26,13 @@ PILOT_SEED = 0
 LOSS_WEIGHT_CANDIDATES = (0.05, 0.1, 0.2)
 
 DECODER_CONTRACT = {
-    "architecture": "lenet_encoder_unet_expansive_path_v2",
+    "architecture": "lenet_encoder_semantic_unet_expansive_path_v3",
     "skip_shapes": [[6, 72, 72], [16, 32, 32]],
     "bottleneck_shape": [16, 16, 16],
     "decoder_channels": [32, 16, 6],
-    "output_shape": [2, 64, 64],
-    "target": "center_cropped_spatial_source_layers",
-    "loss": "intensity_balanced_pit_l1",
+    "output_shape": [10, 64, 64],
+    "target": "class_specific_spatial_source_maps",
+    "loss": "balanced_bce_plus_active_dice",
 }
 
 

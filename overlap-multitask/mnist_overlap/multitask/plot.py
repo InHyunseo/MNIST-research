@@ -16,11 +16,7 @@ from ..config import CLASS_COUNT, OVERLAP_LEVELS
 from ..data import ControlledOverlapMnistDataset
 from ..training_plot import draw_training_curves
 from .config import FIGURE_DIR, TRAINING_LOG_DIR
-from .evaluation import crop_source_images
-from .losses import (
-    match_reconstructions_to_sources,
-    permutation_invariant_reconstruction_loss,
-)
+from .evaluation import crop_source_images, select_source_class_maps
 from .model import MultitaskMnistONet
 
 
@@ -202,7 +198,7 @@ class ComparisonVisualizer:
         model: MultitaskMnistONet,
         device: torch.device,
     ) -> None:
-        """같은 3+8 원본 pair의 Low·Middle·High PIT-matched 복원을 비교한다."""
+        """같은 3+8 pair의 Low·Middle·High class-specific 복원을 비교한다."""
         example_indices = self._select_paired_examples(test_dataset, EXAMPLE_CLASS_PAIR)
         model.eval()
         figure, axes = plt.subplots(
@@ -212,25 +208,29 @@ class ComparisonVisualizer:
             constrained_layout=True,
             squeeze=False,
         )
-        column_titles = ("Mixed", "GT1", "GT2", "Recon1", "Recon2")
+        first_class, second_class = EXAMPLE_CLASS_PAIR
+        column_titles = (
+            "Mixed",
+            f"GT {first_class}",
+            f"GT {second_class}",
+            f"Recon {first_class}",
+            f"Recon {second_class}",
+        )
 
         for row_index, (level, dataset_index) in enumerate(
             zip(OVERLAP_LEVELS, example_indices)
         ):
             sample = test_dataset[dataset_index]
             images = sample["image"].unsqueeze(0).to(device)
-            reconstruction_targets = sample["reconstruction_targets"].unsqueeze(0).to(
-                device
-            )
             output = model(images)
-            pit_result = permutation_invariant_reconstruction_loss(
-                output.reconstructions, reconstruction_targets
-            )
-            matched = match_reconstructions_to_sources(
-                output.reconstructions, pit_result.swapped
+            semantic_probabilities = torch.sigmoid(output.reconstruction_logits)
+            source_reconstructions = select_source_class_maps(
+                semantic_probabilities,
+                torch.tensor([sample["label_first"]], device=device),
+                torch.tensor([sample["label_second"]], device=device),
             )
             cropped_reconstructions = crop_source_images(
-                matched,
+                source_reconstructions,
                 sample["source_offsets"].unsqueeze(0).to(device),
                 sample["source_images"].shape[-1],
             )[0].cpu()

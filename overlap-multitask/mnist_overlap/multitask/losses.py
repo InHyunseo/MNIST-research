@@ -1,108 +1,109 @@
-"""밝은 획과 배경을 균형화한 permutation-invariant reconstruction loss다."""
+"""Class별 U-Net 출력에 사용하는 foreground-balanced BCE와 Dice loss다."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 import torch
+from torch.nn import functional as functional
+
+from ..config import CLASS_COUNT
 
 
 LOSS_EPSILON = 1e-8
+BCE_LOSS_WEIGHT = 0.5
+DICE_LOSS_WEIGHT = 0.5
 
 
 @dataclass(frozen=True)
-class PitLossResult:
-    """Batch 평균 loss, sample별 loss와 swapped assignment 선택 결과."""
+class SemanticLossResult:
+    """Batch 평균 reconstruction loss와 sample별 구성 항목."""
 
     loss: torch.Tensor
     per_sample_loss: torch.Tensor
-    swapped: torch.Tensor
+    balanced_bce_per_sample: torch.Tensor
+    dice_loss_per_sample: torch.Tensor
 
 
-def intensity_balanced_l1_distance(
-    predictions: torch.Tensor,
-    targets: torch.Tensor,
-) -> torch.Tensor:
-    """밝은 획과 배경의 L1을 각각 정규화해 sample별 동일 비중으로 합친다."""
-    if predictions.shape != targets.shape or predictions.ndim != 3:
-        raise ValueError("Balanced L1 입력은 같은 `[batch,height,width]` 형태여야 합니다.")
+def semantic_reconstruction_loss(
+    reconstruction_logits: torch.Tensor,
+    reconstruction_targets: torch.Tensor,
+) -> SemanticLossResult:
+    """Class별 pixel BCE와 활성 class Dice를 같은 비중으로 결합한다.
 
-    absolute_error = torch.abs(predictions - targets)
-    spatial_dimensions = (1, 2)
-    foreground_weights = targets
-    background_weights = 1.0 - targets
-
-    foreground_error = (
-        (foreground_weights * absolute_error).sum(dim=spatial_dimensions)
+    Foreground와 background BCE는 각각 pixel 수로 정규화한 뒤 1:1로 합친다.
+    Dice는 sample마다 실제 숫자가 존재하는 두 class channel에만 계산한다.
+    """
+    _validate_semantic_tensors(reconstruction_logits, reconstruction_targets)
+    spatial_dimensions = (1, 2, 3)
+    foreground_weights = reconstruction_targets
+    background_weights = 1.0 - reconstruction_targets
+    foreground_bce = (
+        (
+            foreground_weights * functional.softplus(-reconstruction_logits)
+        ).sum(dim=spatial_dimensions)
         / foreground_weights.sum(dim=spatial_dimensions).clamp_min(LOSS_EPSILON)
     )
-    background_error = (
-        (background_weights * absolute_error).sum(dim=spatial_dimensions)
+    background_bce = (
+        (
+            background_weights * functional.softplus(reconstruction_logits)
+        ).sum(dim=spatial_dimensions)
         / background_weights.sum(dim=spatial_dimensions).clamp_min(LOSS_EPSILON)
     )
-    return 0.5 * (foreground_error + background_error)
+    balanced_bce = 0.5 * (foreground_bce + background_bce)
 
-
-def permutation_invariant_reconstruction_loss(
-    reconstructions: torch.Tensor,
-    reconstruction_targets: torch.Tensor,
-) -> PitLossResult:
-    """두 assignment의 balanced L1을 sample별로 비교해 더 작은 값을 선택한다."""
-    valid_shape = reconstructions.ndim == 4 and reconstructions.shape[1] == 2
-    if reconstructions.shape != reconstruction_targets.shape or not valid_shape:
-        raise ValueError("PIT 입력은 같은 `[batch,2,height,width]` 형태여야 합니다.")
-
-    direct_loss = (
-        intensity_balanced_l1_distance(
-            reconstructions[:, 0], reconstruction_targets[:, 0]
-        )
-        + intensity_balanced_l1_distance(
-            reconstructions[:, 1], reconstruction_targets[:, 1]
-        )
+    probabilities = torch.sigmoid(reconstruction_logits)
+    foreground_dice = active_foreground_dice_per_sample(
+        probabilities,
+        reconstruction_targets,
     )
-    swapped_loss = (
-        intensity_balanced_l1_distance(
-            reconstructions[:, 0], reconstruction_targets[:, 1]
-        )
-        + intensity_balanced_l1_distance(
-            reconstructions[:, 1], reconstruction_targets[:, 0]
-        )
+    dice_loss = 1.0 - foreground_dice
+    per_sample_loss = (
+        BCE_LOSS_WEIGHT * balanced_bce
+        + DICE_LOSS_WEIGHT * dice_loss
     )
-    swapped = swapped_loss < direct_loss
-    per_sample_loss = torch.where(swapped, swapped_loss, direct_loss)
-    return PitLossResult(per_sample_loss.mean(), per_sample_loss, swapped)
+    return SemanticLossResult(
+        per_sample_loss.mean(),
+        per_sample_loss,
+        balanced_bce,
+        dice_loss,
+    )
 
 
-def match_reconstructions_to_sources(
-    reconstructions: torch.Tensor,
-    swapped: torch.Tensor,
-) -> torch.Tensor:
-    """PIT 선택에 맞춰 두 reconstruction channel 순서를 source 순서로 정렬한다."""
-    swapped_reconstructions = reconstructions[:, [1, 0]]
-    swap_mask = swapped.reshape(-1, 1, 1, 1)
-    return torch.where(swap_mask, swapped_reconstructions, reconstructions)
-
-
-def foreground_dice_per_sample(
-    matched_reconstructions: torch.Tensor,
+def active_foreground_dice_per_sample(
+    reconstruction_probabilities: torch.Tensor,
     reconstruction_targets: torch.Tensor,
 ) -> torch.Tensor:
-    """두 source layer의 soft foreground Dice를 sample별 평균한다."""
-    if (
-        matched_reconstructions.shape != reconstruction_targets.shape
-        or matched_reconstructions.ndim != 4
-        or matched_reconstructions.shape[1] != 2
-    ):
-        raise ValueError("Dice 입력은 같은 `[batch,2,height,width]` 형태여야 합니다.")
+    """실제 숫자가 존재하는 두 class channel의 soft Dice를 sample별 평균한다."""
+    _validate_semantic_tensors(
+        reconstruction_probabilities,
+        reconstruction_targets,
+    )
     spatial_dimensions = (2, 3)
     intersection = (
-        matched_reconstructions * reconstruction_targets
+        reconstruction_probabilities * reconstruction_targets
     ).sum(dim=spatial_dimensions)
     denominator = (
-        torch.square(matched_reconstructions).sum(dim=spatial_dimensions)
+        torch.square(reconstruction_probabilities).sum(dim=spatial_dimensions)
         + torch.square(reconstruction_targets).sum(dim=spatial_dimensions)
     )
-    dice_by_source = (2.0 * intersection + LOSS_EPSILON) / (
+    dice_by_class = (2.0 * intersection + LOSS_EPSILON) / (
         denominator + LOSS_EPSILON
     )
-    return dice_by_source.mean(dim=1)
+    active_classes = reconstruction_targets.sum(dim=spatial_dimensions) > LOSS_EPSILON
+    active_class_counts = active_classes.sum(dim=1)
+    if torch.any(active_class_counts != 2):
+        raise ValueError("각 sample의 semantic target에는 활성 class가 정확히 두 개여야 합니다.")
+    return (dice_by_class * active_classes).sum(dim=1) / active_class_counts
+
+
+def _validate_semantic_tensors(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+) -> None:
+    """Semantic prediction과 target의 공통 `[B,10,H,W]` 계약을 검사한다."""
+    valid_shape = predictions.ndim == 4 and predictions.shape[1] == CLASS_COUNT
+    if predictions.shape != targets.shape or not valid_shape:
+        raise ValueError("Semantic 입력은 같은 `[batch,10,height,width]` 형태여야 합니다.")
+    if torch.any(targets < 0.0) or torch.any(targets > 1.0):
+        raise ValueError("Semantic target 값은 `[0,1]` 범위여야 합니다.")

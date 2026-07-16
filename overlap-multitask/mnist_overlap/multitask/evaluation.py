@@ -22,9 +22,8 @@ from ..metrics import (
 )
 from .config import CHECKPOINT_DIR, METRICS_JSON_PATH, MultitaskConfig
 from .losses import (
-    foreground_dice_per_sample,
-    match_reconstructions_to_sources,
-    permutation_invariant_reconstruction_loss,
+    active_foreground_dice_per_sample,
+    semantic_reconstruction_loss,
 )
 from .model import MultitaskMnistONet
 from .training import load_checkpoint
@@ -42,7 +41,7 @@ METADATA_FIELD_NAMES = (
 )
 RECONSTRUCTION_METRIC_NAMES = (
     "foreground_dice",
-    "balanced_l1",
+    "balanced_bce",
     "l1",
     "mse",
     "psnr",
@@ -100,7 +99,7 @@ class MultitaskPredictor:
         model: MultitaskMnistONet,
         test_loader: DataLoader,
     ) -> dict[str, np.ndarray]:
-        """한 모델의 logit·metadata와 PIT-matched 복원 오차를 array로 모은다."""
+        """한 모델의 분류 logit·metadata와 class별 복원 오차를 array로 모은다."""
         collected_columns: dict[str, list[np.ndarray]] = {
             "logits": [],
             "labels": [],
@@ -116,14 +115,20 @@ class MultitaskPredictor:
             reconstruction_targets = batch["reconstruction_targets"].to(self.device)
             source_offsets = batch["source_offsets"].to(self.device)
             output = model(images)
-            pit_result = permutation_invariant_reconstruction_loss(
-                output.reconstructions, reconstruction_targets
+            reconstruction_result = semantic_reconstruction_loss(
+                output.reconstruction_logits,
+                reconstruction_targets,
             )
-            matched_reconstructions = match_reconstructions_to_sources(
-                output.reconstructions, pit_result.swapped
+            reconstruction_probabilities = torch.sigmoid(
+                output.reconstruction_logits
+            )
+            source_reconstructions = select_source_class_maps(
+                reconstruction_probabilities,
+                batch["label_first"].to(self.device),
+                batch["label_second"].to(self.device),
             )
             cropped_reconstructions = crop_source_images(
-                matched_reconstructions,
+                source_reconstructions,
                 source_offsets,
                 source_images.shape[-1],
             )
@@ -132,8 +137,8 @@ class MultitaskPredictor:
             l1_per_sample = absolute_error.mean(dim=(1, 2, 3))
             mse_per_sample = squared_error.mean(dim=(1, 2, 3))
             psnr_per_sample = -10.0 * torch.log10(mse_per_sample.clamp_min(1e-12))
-            dice_per_sample = foreground_dice_per_sample(
-                matched_reconstructions,
+            dice_per_sample = active_foreground_dice_per_sample(
+                reconstruction_probabilities,
                 reconstruction_targets,
             )
 
@@ -142,8 +147,8 @@ class MultitaskPredictor:
             collected_columns["overlap_level"].append(
                 np.asarray(batch["overlap_level"])
             )
-            collected_columns["balanced_l1"].append(
-                pit_result.per_sample_loss.cpu().numpy()
+            collected_columns["balanced_bce"].append(
+                reconstruction_result.balanced_bce_per_sample.cpu().numpy()
             )
             collected_columns["foreground_dice"].append(
                 dice_per_sample.cpu().numpy()
@@ -208,7 +213,7 @@ class ComparisonEvaluator:
         return {
             "models": {
                 "baseline": "MnistONet",
-                "multitask": "MnistONet+UNetDecoder",
+                "multitask": "MnistONet+SemanticUNetDecoder",
             },
             "training_seeds": training_seeds,
             "reconstruction_loss_weight": reconstruction_loss_weight,
@@ -483,20 +488,38 @@ class ComparisonEvaluator:
         ]
 
 
+def select_source_class_maps(
+    semantic_maps: torch.Tensor,
+    label_first: torch.Tensor,
+    label_second: torch.Tensor,
+) -> torch.Tensor:
+    """각 sample의 두 정답 class channel을 `[batch,2,H,W]` 순서로 선택한다."""
+    batch_size = semantic_maps.shape[0]
+    if semantic_maps.ndim != 4 or semantic_maps.shape[1] != CLASS_COUNT:
+        raise ValueError("Semantic map은 `[batch,10,height,width]` 형태여야 합니다.")
+    if tuple(label_first.shape) != (batch_size,) or tuple(label_second.shape) != (
+        batch_size,
+    ):
+        raise ValueError("Class label은 `[batch]` 형태여야 합니다.")
+    class_indices = torch.stack((label_first, label_second), dim=1)
+    batch_indices = torch.arange(batch_size, device=semantic_maps.device).unsqueeze(1)
+    return semantic_maps[batch_indices, class_indices]
+
+
 def crop_source_images(
-    matched_reconstructions: torch.Tensor,
+    source_reconstructions: torch.Tensor,
     source_offsets: torch.Tensor,
     source_size: int,
 ) -> torch.Tensor:
     """각 source의 target 좌표에서 `source_size×source_size` patch를 모은다."""
-    if matched_reconstructions.ndim != 4 or matched_reconstructions.shape[1] != 2:
+    if source_reconstructions.ndim != 4 or source_reconstructions.shape[1] != 2:
         raise ValueError("복원 결과는 `[batch,2,height,width]` 형태여야 합니다.")
-    expected_offset_shape = (matched_reconstructions.shape[0], 2, 2)
+    expected_offset_shape = (source_reconstructions.shape[0], 2, 2)
     if tuple(source_offsets.shape) != expected_offset_shape:
         raise ValueError("Source offset은 `[batch,2,2]` 형태여야 합니다.")
 
-    maximum_y = matched_reconstructions.shape[-2] - source_size
-    maximum_x = matched_reconstructions.shape[-1] - source_size
+    maximum_y = source_reconstructions.shape[-2] - source_size
+    maximum_x = source_reconstructions.shape[-1] - source_size
     offset_x = source_offsets[..., 0]
     offset_y = source_offsets[..., 1]
     if (
@@ -507,14 +530,14 @@ def crop_source_images(
     ):
         raise ValueError("Source crop이 reconstruction 범위를 벗어납니다.")
 
-    sliding_patches = matched_reconstructions.unfold(2, source_size, 1).unfold(
+    sliding_patches = source_reconstructions.unfold(2, source_size, 1).unfold(
         3, source_size, 1
     )
     batch_indices = torch.arange(
-        matched_reconstructions.shape[0],
-        device=matched_reconstructions.device,
+        source_reconstructions.shape[0],
+        device=source_reconstructions.device,
     ).unsqueeze(1)
-    source_indices = torch.arange(2, device=matched_reconstructions.device).unsqueeze(0)
+    source_indices = torch.arange(2, device=source_reconstructions.device).unsqueeze(0)
     return sliding_patches[
         batch_indices,
         source_indices,

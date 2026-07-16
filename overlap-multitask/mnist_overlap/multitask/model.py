@@ -7,19 +7,20 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from ..config import CLASS_COUNT
 from ..model import MnistONet
 
 
 @dataclass(frozen=True)
 class MultitaskOutput:
-    """분류 logit과 순서 없는 두 원본 숫자 복원 결과."""
+    """분류 logit과 class별 spatial reconstruction logit."""
 
     logits: torch.Tensor
-    reconstructions: torch.Tensor
+    reconstruction_logits: torch.Tensor
 
 
 class ReconstructionDecoder(nn.Module):
-    """LeNet의 세 해상도를 연결해 두 장의 `64×64` source layer를 분리한다.
+    """LeNet의 세 해상도를 연결해 class별 `64×64` source map을 복원한다.
 
     원 U-Net의 `up-convolution → encoder feature concat → double convolution`
     순서를 두 해상도에 적용한다. LeNet 분류 구조를 보존해야 하므로 contracting
@@ -33,7 +34,7 @@ class ReconstructionDecoder(nn.Module):
         self.refine_middle = DoubleConvolution(32, 16)
         self.up_high = nn.ConvTranspose2d(16, 6, kernel_size=2, stride=2)
         self.refine_high = DoubleConvolution(12, 6)
-        self.output = nn.Conv2d(6, 2, kernel_size=1)
+        self.output = nn.Conv2d(6, CLASS_COUNT, kernel_size=1)
 
     def forward(
         self,
@@ -41,7 +42,7 @@ class ReconstructionDecoder(nn.Module):
         middle_resolution: torch.Tensor,
         bottleneck: torch.Tensor,
     ) -> torch.Tensor:
-        """LeNet feature tuple을 `[batch,2,64,64]` source layer로 변환한다."""
+        """LeNet feature tuple을 `[batch,10,64,64]` semantic logit으로 변환한다."""
         decoded_middle = self.up_middle(self.bottleneck(bottleneck))
         decoded_middle = self.refine_middle(torch.cat(
             (decoded_middle, middle_resolution),
@@ -54,7 +55,7 @@ class ReconstructionDecoder(nn.Module):
             (decoded_high, cropped_high_resolution),
             dim=1,
         ))
-        return torch.sigmoid(self.output(decoded_high))
+        return self.output(decoded_high)
 
 
 class DoubleConvolution(nn.Sequential):
@@ -103,9 +104,9 @@ class MultitaskMnistONet(nn.Module):
             self.classifier.encode_with_skips(images)
         )
         logits = self.classifier.classify_features(bottleneck)
-        reconstructions = self.decoder(
+        reconstruction_logits = self.decoder(
             high_resolution,
             middle_resolution,
             bottleneck,
         )
-        return MultitaskOutput(logits, reconstructions)
+        return MultitaskOutput(logits, reconstruction_logits)
