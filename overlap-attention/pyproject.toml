@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mnist-overlap"
+version = "0.1.0"
+description = "겹침 강도에 따른 MNIST 숫자 인식과 spatial attention 비교 실험"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4,<3",
+    "torchvision>=0.19,<1",
+    "numpy>=1.26,<3",
+    "PyYAML>=6,<7",
+    "matplotlib>=3.8,<4",
+]
+
+[project.scripts]
+mnist-overlap = "mnist_overlap.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

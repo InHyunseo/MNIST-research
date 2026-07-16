@@ -1,0 +1,13 @@
+comparison,seed,estimate,confidence_lower,confidence_upper
+lenet_low_minus_high,0,0.2045,0.195,0.2143
+class_attention_minus_lenet_high,0,-0.0279,-0.0371,-0.0187
+class_attention_minus_shared_high,0,-0.0075,-0.0164,0.0013
+class_attention_vs_lenet_high_low_difference,0,-0.0238,-0.0345,-0.0127
+lenet_low_minus_high,1,0.2111,0.2013,0.22100249999999996
+class_attention_minus_lenet_high,1,0.0053,-0.004,0.0144
+class_attention_minus_shared_high,1,0.0313,0.02189750000000001,0.0406
+class_attention_vs_lenet_high_low_difference,1,-0.0048,-0.016,0.0062
+lenet_low_minus_high,2,0.2378,0.2279,0.248
+class_attention_minus_lenet_high,2,0.0338,0.02459750000000001,0.043
+class_attention_minus_shared_high,2,0.0004,-0.008102499999999988,0.0093
+class_attention_vs_lenet_high_low_difference,2,0.021,0.0096,0.0318

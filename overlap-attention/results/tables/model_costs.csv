@@ -1,0 +1,4 @@
+model,parameters,multiply_accumulate_operations
+lenet,505226,3737640
+shared_attention,505243,3754024
+class_attention,505396,8415880
