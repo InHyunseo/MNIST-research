@@ -11,7 +11,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from ..config import CLASS_COUNT, OVERLAP_LEVELS
+from ..config import CLASS_COUNT, COMPOSITION_MODE, OVERLAP_LEVELS
 from ..data import ControlledOverlapMnistDataset
 from ..metrics import (
     class_pair_accuracy,
@@ -215,6 +215,7 @@ class ComparisonEvaluator:
                 "baseline": "MnistONet",
                 "multitask": "MnistONet+SemanticUNetDecoder",
             },
+            "composition_mode": COMPOSITION_MODE,
             "training_seeds": training_seeds,
             "reconstruction_loss_weight": reconstruction_loss_weight,
             "bootstrap_iterations": self.config.baseline.evaluation.bootstrap_iterations,

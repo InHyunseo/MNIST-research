@@ -14,7 +14,7 @@ import warnings
 import numpy as np
 import torch
 
-from ..config import CLASS_COUNT, RESULTS_DIR, ExperimentConfig
+from ..config import CLASS_COUNT, COMPOSITION_MODE, RESULTS_DIR, ExperimentConfig
 from ..metrics import (
     class_pair_accuracy,
     classification_metrics,
@@ -92,6 +92,7 @@ class Evaluator:
 
         return {
             "model": "MnistONet",
+            "composition_mode": COMPOSITION_MODE,
             "training_seeds": training_seeds,
             "bootstrap_iterations": iterations,
             "confidence_level": confidence_level,

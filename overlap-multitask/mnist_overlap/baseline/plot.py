@@ -82,7 +82,7 @@ class Visualizer:
         Controlled overlap 입력 예시 그림(3×3). 각 행은 한 숫자 조합(1+0, 4+7, 3+8),
         각 열은 overlap level(Low/Middle/High)이다. 한 행 안에서는 동일한 MNIST 원본
         두 장·pair 중심·이동 방향을 유지하고 변위만 바꿔, 열 간 차이가 순수하게 겹침
-        강도의 변화임을 보여준다. 각 칸의 밝기는 두 숫자의 pixel-wise maximum 합성 결과다.
+        강도의 변화임을 보여준다. 각 칸의 밝기는 두 숫자의 pixel-wise mean 합성 결과다.
         """
         figure, axes = plt.subplots(
             len(EXAMPLE_CLASS_PAIRS),

@@ -25,6 +25,7 @@ FIGURE_DIR = RESULTS_DIR / "figures"
 
 CLASS_COUNT = 10
 OVERLAP_LEVELS = ("low", "middle", "high")
+COMPOSITION_MODE = "mean"
 
 
 def _require_positive(section_name: str, **values: int | float) -> None:
@@ -223,6 +224,7 @@ def config_fingerprint(config: ExperimentConfig) -> str:
         "data": asdict(config.data),
         "overlap": asdict(config.overlap),
         "training": asdict(config.training),
+        "composition_mode": COMPOSITION_MODE,
     })
 
 
@@ -232,4 +234,5 @@ def data_config_fingerprint(config: ExperimentConfig) -> str:
         "data": asdict(config.data),
         "overlap": asdict(config.overlap),
         "class_count": CLASS_COUNT,
+        "composition_mode": COMPOSITION_MODE,
     })
