@@ -25,7 +25,7 @@ FIGURE_DIR = RESULTS_DIR / "figures"
 
 CLASS_COUNT = 10
 OVERLAP_LEVELS = ("low", "middle", "high")
-COMPOSITION_MODE = "mean"
+COMPOSITION_MODE = "clipped_sum"
 
 
 def _require_positive(section_name: str, **values: int | float) -> None:

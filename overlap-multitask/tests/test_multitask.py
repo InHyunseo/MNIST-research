@@ -69,9 +69,9 @@ class BaselineCompatibilityTest(unittest.TestCase):
 class DatasetContractTest(unittest.TestCase):
     """Source image 반환 옵션이 기존 sample 계약을 보존하는지 검사한다."""
 
-    def test_overlap_composition_uses_pixelwise_mean(self) -> None:
-        source_image_first = torch.tensor([[1.0, 0.0], [0.0, 0.0]])
-        source_image_second = torch.tensor([[0.5, 1.0], [0.0, 0.0]])
+    def test_overlap_composition_uses_clipped_sum(self) -> None:
+        source_image_first = torch.tensor([[1.0, 0.2], [0.0, 0.0]])
+        source_image_second = torch.tensor([[0.5, 0.3], [0.0, 0.0]])
         actual = render_overlap_sample(
             source_image_first,
             source_image_second,
@@ -79,8 +79,8 @@ class DatasetContractTest(unittest.TestCase):
             (0, 0),
             canvas_size=2,
         )
-        expected = torch.tensor([[0.75, 0.5], [0.0, 0.0]])
-        self.assertEqual(COMPOSITION_MODE, "mean")
+        expected = torch.tensor([[1.0, 0.5], [0.0, 0.0]])
+        self.assertEqual(COMPOSITION_MODE, "clipped_sum")
         self.assertTrue(torch.equal(actual, expected))
 
     def test_source_images_are_optional_and_have_expected_shape(self) -> None:

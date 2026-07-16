@@ -5,8 +5,8 @@
 기존 LeNet baseline의 encoder와 classification head를 유지하고 U-Net expansive path를
 공유 encoder에 연결한다. Decoder는 두 개의 순서 없는 source가 아니라 숫자 class마다
 의미가 고정된 10개 spatial map을 예측한다.
-입력은 두 source canvas의 pixel-wise 산술평균
-`mixed = (canvas_first + canvas_second) / 2`으로 합성한다.
+입력은 두 source canvas의 pixel-wise 합을 `[0,1]` 범위로 잘라
+`mixed = clamp(canvas_first + canvas_second, 0, 1)`로 합성한다.
 
 - Baseline: classification `BCEWithLogitsLoss`
 - Multitask: classification BCE + `λ_rec × semantic reconstruction loss`
@@ -73,8 +73,8 @@ L=L_{classification}+\lambda_{rec}
 ## 실행과 검증
 
 기존 통합 CLI를 유지한다. Composition mode를 data·model fingerprint에 포함하므로
-이전 maximum 합성 checkpoint는 재사용하지 않는다. Baseline과 multitask를 모두
-같은 mean 합성 데이터로 다시 학습하고, 기존 각 output 경로의 비호환 파일을 교체한다.
+이전 maximum·mean 합성 checkpoint는 재사용하지 않는다. Baseline과 multitask를 모두
+같은 clipped-sum 합성 데이터로 다시 학습하고, 기존 각 output 경로의 비호환 파일을 교체한다.
 
 ```bash
 CUBLAS_WORKSPACE_CONFIG=:4096:8 \

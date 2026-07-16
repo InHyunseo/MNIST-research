@@ -32,12 +32,12 @@ def render_overlap_sample(
     offset_second: tuple[int, int],
     canvas_size: int = CANVAS_SIZE,
 ) -> torch.Tensor:
-    """두 원본 숫자를 canvas에 배치하고 pixel별 산술평균으로 합성한다."""
+    """두 원본 숫자를 canvas에 배치하고 pixel별 합을 `[0,1]`로 자른다."""
     canvas_first = torch.zeros((canvas_size, canvas_size), dtype=torch.float32)
     canvas_second = torch.zeros_like(canvas_first)
     _place_image(canvas_first, source_image_first, offset_first)
     _place_image(canvas_second, source_image_second, offset_second)
-    return 0.5 * (canvas_first + canvas_second)
+    return torch.clamp(canvas_first + canvas_second, min=0.0, max=1.0)
 
 
 def render_semantic_targets(
