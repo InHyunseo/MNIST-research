@@ -1,0 +1,45 @@
+# Fixed-length three-digit MNIST recognition.
+dataset:
+  sequence_length: 3
+  digit_size: 28
+  slot_size: 32
+  train_samples: 60000
+  test_samples: 10000
+  train_seed: 100
+  test_seed: 200
+
+model:
+  conv1_channels: 6
+  conv2_channels: 16
+  conv3_channels: 120
+  fc_hidden: 84
+  kernel_size: 5
+  pool_size: 2
+
+train:
+  seed: 0
+  epochs: 5
+  fallback_epochs: 10
+  batch_size: 128
+  learning_rate: 0.001
+  min_digit_accuracy: 0.96
+  min_exact_match: 0.90
+
+evaluation:
+  batch_size: 512
+  sample_predictions: 20
+
+export:
+  opset: 17
+  rtol: 0.0001
+  atol: 0.00001
+
+benchmark:
+  warmup: 100
+  n: 2000
+  threads: 1
+
+# Raw uint8 input is normalized inside the model graph.
+preprocess:
+  mean: 0.1307
+  std: 0.3081
