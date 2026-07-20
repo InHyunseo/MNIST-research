@@ -1,5 +1,5 @@
 """
-Shared LeNet encoder, classification head와 선택적 denoising decoder를 정의한다.
+PyTorch 공식 tutorial의 LeNet을 encoder와 head로 나누고 denoising decoder를 결합한다.
 
 입력:
     - batch 형태의 1×32×32 noisy image
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+import torch.nn.functional as functional
 
 
 class SharedEncoder(nn.Module):
@@ -25,17 +26,16 @@ class SharedEncoder(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Conv2d(1, 6, kernel_size=5),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2),
-            nn.Conv2d(6, 16, kernel_size=5),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2),
-        )
+        self.conv1 = nn.Conv2d(1, 6, kernel_size=5)
+        self.conv2 = nn.Conv2d(6, 16, kernel_size=5)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        return self.layers(images)
+        features = functional.max_pool2d(
+            functional.relu(self.conv1(images)), kernel_size=2
+        )
+        return functional.max_pool2d(
+            functional.relu(self.conv2(features)), kernel_size=2
+        )
 
 
 class ClassificationHead(nn.Module):
@@ -43,17 +43,15 @@ class ClassificationHead(nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(16 * 5 * 5, 120),
-            nn.ReLU(),
-            nn.Linear(120, 84),
-            nn.ReLU(),
-            nn.Linear(84, 10),
-        )
+        self.fc1 = nn.Linear(16 * 5 * 5, 120)
+        self.fc2 = nn.Linear(120, 84)
+        self.fc3 = nn.Linear(84, 10)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.layers(features)
+        flattened_features = torch.flatten(features, 1)
+        hidden_features = functional.relu(self.fc1(flattened_features))
+        hidden_features = functional.relu(self.fc2(hidden_features))
+        return self.fc3(hidden_features)
 
 
 class DenoisingDecoder(nn.Module):
