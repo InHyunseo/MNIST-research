@@ -17,6 +17,16 @@ head를 사용하고 decoder 유무만 바꾼다.
 Multitask는 각 noise의 seed 0에서 `λ ∈ {0.05, 0.1, 0.2}`를 비교해 validation
 classification accuracy가 가장 높은 값을 선택한 뒤 모든 seed를 처음부터 학습한다.
 
+n-MNIST의 noise 강도는 배포본에 다음과 같이 고정돼 있다.
+
+| Noise | 고정 조건 |
+|---|---|
+| AWGN | SNR 9.5 |
+| Motion blur | 이동 거리 5px, 반시계 방향 15° |
+| Reduced contrast + AWGN | Contrast 50%, SNR 12 |
+
+코드는 noise를 새로 생성하거나 강도를 변경하지 않고 배포된 noisy image를 그대로 사용한다.
+
 ## 모델 구조
 
 Backbone은 PyTorch 공식 Neural Networks tutorial에서 `LeNet`으로 제공하는 구현과
@@ -84,7 +94,7 @@ python main.py plot
 outputs/
 ├── checkpoints/       final run별 best-validation checkpoint
 ├── histories/         final run별 epoch CSV
-├── figures/           accuracy 비교, delta와 history figure
+├── figures/           accuracy 비교, delta와 seed-overlaid history figure
 ├── pilot_results.csv  noise별 λ 후보의 validation 결과
 └── results.csv        final seed별 test classification 결과
 ```

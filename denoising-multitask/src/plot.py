@@ -6,7 +6,7 @@
     - outputs/histories의 최종 run별 CSV
 
 출력:
-    - Accuracy comparison, paired delta, run별 loss·accuracy PNG
+    - Accuracy comparison, paired delta, seed-overlaid loss·accuracy PNG
 
 주요 기능:
     1. Seed별 결과 집계
@@ -154,57 +154,149 @@ def _plot_accuracy_delta(results: pd.DataFrame) -> None:
 
 
 def _plot_training_histories() -> None:
-    """각 최종 run의 loss와 accuracy history를 서로 다른 figure로 저장한다."""
-    history_paths = sorted(HISTORY_DIRECTORY.glob("*_seed_*.csv"))
-    if not history_paths:
-        raise FileNotFoundError(f"최종 학습 history가 없습니다: {HISTORY_DIRECTORY}")
-    for history_path in history_paths:
-        history = pd.read_csv(history_path)
-        _plot_loss_history(history, history_path.stem)
-        _plot_accuracy_history(history, history_path.stem)
-
-
-def _plot_loss_history(history: pd.DataFrame, run_name: str) -> None:
-    """한 final run의 training·validation loss를 저장한다."""
-    figure, axis = plt.subplots(figsize=(7, 4.5))
-    axis.plot(history["epoch"], history["training_total_loss"], label="Training total")
-    axis.plot(
-        history["epoch"], history["validation_total_loss"], label="Validation total"
+    """Noise와 condition별 loss·accuracy를 공통 축 범위로 저장한다."""
+    legacy_patterns = (
+        "*_seed_*_loss.png",
+        "*_seed_*_accuracy.png",
+        "*_loss_spaghetti.png",
+        "*_accuracy_spaghetti.png",
     )
-    if history["training_reconstruction_loss"].notna().any():
-        axis.plot(
-            history["epoch"],
-            history["training_reconstruction_loss"],
-            linestyle="--",
-            label="Training reconstruction",
+    for legacy_pattern in legacy_patterns:
+        for legacy_path in FIGURE_DIRECTORY.glob(legacy_pattern):
+            legacy_path.unlink()
+
+    histories_by_run = {}
+    maximum_loss = 0.0
+    minimum_accuracy = 1.0
+    for noise_type in NOISE_TYPES:
+        for condition in CONDITIONS:
+            history_paths = sorted(
+                HISTORY_DIRECTORY.glob(f"{noise_type}_{condition}_seed_*.csv")
+            )
+            if not history_paths:
+                raise FileNotFoundError(
+                    "최종 학습 history가 없습니다: "
+                    f"noise={noise_type}, condition={condition}"
+                )
+            histories = []
+            for history_path in history_paths:
+                history = pd.read_csv(history_path)
+                history["random_seed"] = int(history_path.stem.rsplit("_seed_", 1)[1])
+                histories.append(history)
+            combined_history = pd.concat(histories, ignore_index=True)
+            histories_by_run[(noise_type, condition)] = combined_history
+            run_maximum_loss = combined_history[
+                ["training_total_loss", "validation_total_loss"]
+            ].to_numpy(dtype=np.float64).max()
+            run_minimum_accuracy = combined_history[
+                ["training_accuracy", "validation_accuracy"]
+            ].to_numpy(dtype=np.float64).min()
+            maximum_loss = max(maximum_loss, float(run_maximum_loss))
+            minimum_accuracy = min(minimum_accuracy, float(run_minimum_accuracy))
+
+    if not np.isfinite(maximum_loss) or maximum_loss <= 0.0:
+        raise ValueError("History loss가 올바른 양수가 아닙니다.")
+    if not np.isfinite(minimum_accuracy) or not 0.0 <= minimum_accuracy <= 1.0:
+        raise ValueError("History accuracy가 0과 1 사이의 유한한 값이 아닙니다.")
+    loss_upper_limit = max(0.1, float(np.ceil(maximum_loss * 10.5) / 10.0))
+    accuracy_lower_limit = max(
+        0.0,
+        float(np.floor((minimum_accuracy - 0.01) * 20.0) / 20.0),
+    )
+    for (noise_type, condition), history in histories_by_run.items():
+        _plot_spaghetti_history(
+            history,
+            noise_type,
+            condition,
+            loss_upper_limit,
+            accuracy_lower_limit,
         )
-        axis.plot(
-            history["epoch"],
-            history["validation_reconstruction_loss"],
-            linestyle="--",
-            label="Validation reconstruction",
-        )
-    axis.set_xlabel("Epoch")
-    axis.set_ylabel("Loss")
-    axis.set_title(run_name)
-    axis.legend()
-    axis.grid(alpha=0.25)
-    figure.tight_layout()
-    figure.savefig(FIGURE_DIRECTORY / f"{run_name}_loss.png", dpi=160)
-    plt.close(figure)
 
 
-def _plot_accuracy_history(history: pd.DataFrame, run_name: str) -> None:
-    """한 final run의 training·validation classification accuracy를 저장한다."""
-    figure, axis = plt.subplots(figsize=(7, 4.5))
-    axis.plot(history["epoch"], history["training_accuracy"], label="Training")
-    axis.plot(history["epoch"], history["validation_accuracy"], label="Validation")
-    axis.set_xlabel("Epoch")
-    axis.set_ylabel("Classification accuracy")
-    axis.set_ylim(0.0, 1.0)
-    axis.set_title(run_name)
-    axis.legend()
-    axis.grid(alpha=0.25)
-    figure.tight_layout()
-    figure.savefig(FIGURE_DIRECTORY / f"{run_name}_accuracy.png", dpi=160)
+def _plot_spaghetti_history(
+    history: pd.DataFrame,
+    noise_type: str,
+    condition: str,
+    loss_upper_limit: float,
+    accuracy_lower_limit: float,
+) -> None:
+    """Loss와 accuracy를 한 행에 나란히 놓고 seed 곡선을 겹쳐 그린다."""
+    required_columns = {
+        "epoch",
+        "random_seed",
+        "training_total_loss",
+        "validation_total_loss",
+        "training_accuracy",
+        "validation_accuracy",
+    }
+    missing_columns = required_columns - set(history.columns)
+    if missing_columns:
+        missing_text = ", ".join(sorted(missing_columns))
+        raise ValueError(f"History에 필요한 column이 없습니다: {missing_text}")
+
+    figure, axes = plt.subplots(1, 2, figsize=(10, 4))
+    colors = {"training": "#4C78A8", "validation": "#F58518"}
+    metrics = (
+        (
+            "Loss",
+            "training_total_loss",
+            "validation_total_loss",
+            (0.0, loss_upper_limit),
+        ),
+        (
+            "Accuracy",
+            "training_accuracy",
+            "validation_accuracy",
+            (accuracy_lower_limit, 1.0),
+        ),
+    )
+    for metric_index, (title, training_column, validation_column, limits) in enumerate(
+        metrics
+    ):
+        axis = axes[metric_index]
+        for _, seed_history in history.groupby("random_seed", sort=True):
+            axis.plot(
+                seed_history["epoch"],
+                seed_history[training_column],
+                color=colors["training"],
+                linewidth=1.1,
+                alpha=0.42,
+            )
+            axis.plot(
+                seed_history["epoch"],
+                seed_history[validation_column],
+                color=colors["validation"],
+                linewidth=1.1,
+                alpha=0.42,
+            )
+
+        mean_history = history.groupby("epoch", as_index=False)[
+            [training_column, validation_column]
+        ].mean()
+        axis.plot(
+            mean_history["epoch"],
+            mean_history[training_column],
+            color=colors["training"],
+            linewidth=2.0,
+            label="Train",
+        )
+        axis.plot(
+            mean_history["epoch"],
+            mean_history[validation_column],
+            color=colors["validation"],
+            linewidth=2.0,
+            label="Validation",
+        )
+        axis.set_title(title)
+        axis.set_xlabel("Epoch")
+        axis.set_ylim(*limits)
+        axis.grid(alpha=0.25)
+
+    axes[1].legend()
+    figure.suptitle(f"{NOISE_LABELS[noise_type]} — {CONDITION_LABELS[condition]}")
+    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
+    figure.savefig(
+        FIGURE_DIRECTORY / f"{noise_type}_{condition}_history_spaghetti.png",
+        dpi=160,
+    )
     plt.close(figure)
