@@ -27,7 +27,11 @@ python -m pip install -r requirements.txt
 
 ## 데이터 준비
 
-LSU n-MNIST archive 세 개를 `data/raw/`에 배치한다.
+[LSU 공식 n-MNIST 배포 페이지](https://www.csc.lsu.edu/~saikat/n-mnist/)에서 받은
+archive 세 개를 `data/raw/`에 배치한다.
+
+n-MNIST를 사용한 결과를 보고할 때는 배포 페이지의 안내에 따라 Basu et al. (2015)을
+본문에서 인용하고 References에 전체 서지정보를 포함한다.
 
 ```text
 mnist-with-awgn.gz
@@ -36,7 +40,8 @@ mnist-with-reduced-contrast-and-awgn.gz
 ```
 
 다음 명령은 archive를 최초 한 번만 MAT로 추출하고, n-MNIST와 순서가 일치하는
-DeepLearnToolbox의 clean `mnist_uint8.mat`를 준비한다.
+[DeepLearnToolbox의 clean `mnist_uint8.mat`](https://github.com/rasmusbergpalm/DeepLearnToolbox/blob/5df2801f2196a2afddb7a87f800e63e153c34995/data/mnist_uint8.mat)를
+준비한다.
 
 ```bash
 python main.py data
@@ -68,3 +73,9 @@ outputs/
 
 Checkpoint는 validation classification accuracy로 선택하며 test set은 최종 평가에만
 사용한다. 완료된 현재 설정의 checkpoint가 있으면 다시 학습하지 않고 재사용한다.
+
+## References
+
+- Basu et al. (2015), [Learning Sparse Feature Representations using Probabilistic
+  Quadtrees and Deep Belief Nets](https://repository.lsu.edu/enviro_sciences_pubs/422/),
+  ESANN 2015.
