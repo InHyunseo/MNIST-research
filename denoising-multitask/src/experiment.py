@@ -154,7 +154,10 @@ def train_one_epoch(
         clean_targets = batch["clean_target"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        output = model(noisy_images)
+        output = model(
+            noisy_images,
+            include_reconstruction=reconstruction_enabled,
+        )
         classification_loss = classification_loss_function(
             output["classification_logits"], labels
         )
@@ -202,6 +205,7 @@ def evaluate_model(
     data_loader: DataLoader,
     device: torch.device,
     reconstruction_weight: float,
+    include_reconstruction: bool = False,
 ) -> EpochMetrics:
     """Parameter를 변경하지 않고 loss와 classification accuracy를 계산한다."""
     model.eval()
@@ -212,13 +216,16 @@ def evaluate_model(
     reconstruction_loss_sum = 0.0
     total_correct = 0
     total_samples = 0
-    reconstruction_enabled = model.decoder is not None
+    reconstruction_enabled = include_reconstruction and model.decoder is not None
 
     for batch in data_loader:
         noisy_images = batch["noisy_image"].to(device, non_blocking=True)
         clean_targets = batch["clean_target"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
-        output = model(noisy_images)
+        output = model(
+            noisy_images,
+            include_reconstruction=include_reconstruction,
+        )
         classification_loss = classification_loss_function(
             output["classification_logits"], labels
         )
@@ -297,7 +304,11 @@ def _run_final_experiment(
         )
 
     test_metrics = evaluate_model(
-        model, test_loader, device, configuration.reconstruction_weight
+        model,
+        test_loader,
+        device,
+        configuration.reconstruction_weight,
+        include_reconstruction=False,
     )
     _upsert_final_result(configuration, training_result, test_metrics)
     print(
@@ -318,6 +329,7 @@ def _train_model(
 ) -> TrainingResult:
     """고정 epoch를 학습하고 validation accuracy 기준 best checkpoint를 복원한다."""
     optimizer = torch.optim.Adam(model.parameters(), lr=configuration.learning_rate)
+    phase = "pilot" if checkpoint_path.stem.startswith("pilot_") else "final"
     best_validation_accuracy = -1.0
     best_epoch = 0
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -347,6 +359,7 @@ def _train_model(
                 validation_loader,
                 device,
                 configuration.reconstruction_weight,
+                include_reconstruction=True,
             )
             writer.writerow([
                 epoch,
@@ -361,8 +374,9 @@ def _train_model(
             ])
             history_file.flush()
             print(
-                f"noise={configuration.noise_type} "
+                f"phase={phase} noise={configuration.noise_type} "
                 f"condition={configuration.condition} "
+                f"reconstruction_weight={configuration.reconstruction_weight:g} "
                 f"seed={configuration.random_seed} epoch={epoch} "
                 f"validation_accuracy={validation_metrics.accuracy:.4f}"
             )

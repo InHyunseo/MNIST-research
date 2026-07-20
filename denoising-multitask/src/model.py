@@ -86,11 +86,17 @@ class DenoisingAuxiliaryLeNet(nn.Module):
         self.decoder = DenoisingDecoder() if use_decoder else None
 
     def forward(
-        self, noisy_images: torch.Tensor
+        self,
+        noisy_images: torch.Tensor,
+        include_reconstruction: bool = False,
     ) -> dict[str, torch.Tensor | None]:
         features = self.encoder(noisy_images)
         classification_logits = self.classification_head(features)
-        reconstruction = self.decoder(features) if self.decoder is not None else None
+        reconstruction = (
+            self.decoder(features)
+            if include_reconstruction and self.decoder is not None
+            else None
+        )
         return {
             "classification_logits": classification_logits,
             "reconstruction": reconstruction,
