@@ -59,9 +59,7 @@ mnist-with-motion-blur.gz
 mnist-with-reduced-contrast-and-awgn.gz
 ```
 
-다음 명령은 archive를 최초 한 번만 MAT로 추출하고, n-MNIST와 순서가 일치하는
-[DeepLearnToolbox의 clean `mnist_uint8.mat`](https://github.com/rasmusbergpalm/DeepLearnToolbox/blob/5df2801f2196a2afddb7a87f800e63e153c34995/data/mnist_uint8.mat)를
-준비한다.
+다음 명령은 archive를 최초 한 번만 MAT로 추출하고 clean target을 준비한다.
 
 ```bash
 python main.py data
