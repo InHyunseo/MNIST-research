@@ -29,7 +29,6 @@ from ..training_plot import draw_training_curves
 OVERLAP_LEVELS = ("low", "middle", "high")
 EXAMPLE_CLASS_PAIRS = ((1, 0), (4, 7), (3, 8))
 BAR_COLOR = "#4C78A8"
-MEAN_COLOR = "#173F67"
 FIGURE_DPI = 150
 
 
@@ -68,8 +67,6 @@ class Visualizer:
             [TRAINING_LOG_DIR / f"seed_{seed}.csv" for seed in training_seeds],
             accuracy_column="validation_exact_match",
             loss_column="validation_loss",
-            line_color=BAR_COLOR,
-            mean_color=MEAN_COLOR,
             output_path=FIGURE_DIR / "training_curves.png",
             figure_dpi=FIGURE_DPI,
         )

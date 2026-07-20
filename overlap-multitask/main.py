@@ -1,4 +1,4 @@
-"""Baseline과 multitask MNIST-O 실험을 선택 실행하는 저장소 통합 진입점."""
+"""MNIST 평가기와 baseline·multitask 실험을 선택 실행하는 통합 진입점."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mnist_overlap.baseline.main import run as run_baseline
 from mnist_overlap.config import DEFAULT_CONFIG_PATH
+from mnist_overlap.mnist_classifier import run as run_mnist_classifier
 from mnist_overlap.multitask.config import DEFAULT_MULTITASK_CONFIG_PATH
 from mnist_overlap.multitask.main import run as run_multitask
 
@@ -16,6 +17,15 @@ def main() -> None:
     """CLI에서 선택한 모델의 전체 실행·평가·시각화 단계를 호출한다."""
     sys.stdout.reconfigure(line_buffering=True)
     arguments = _parse_arguments()
+
+    if arguments.model in ("mnist", "all") and not arguments.plot:
+        _print_pipeline_header("MNIST Evaluator")
+        run_mnist_classifier(
+            device_name=arguments.device,
+            skip_training=arguments.skip_training,
+        )
+    elif arguments.model == "mnist":
+        raise ValueError("MNIST 평가기는 생성할 그림이 없습니다. --plot을 제거하세요.")
 
     if arguments.model in ("baseline", "all"):
         _print_pipeline_header("Baseline")
@@ -44,13 +54,13 @@ def _print_pipeline_header(name: str) -> None:
 def _parse_arguments() -> argparse.Namespace:
     """모델 선택, config, device와 실행 단계를 해석한다."""
     parser = argparse.ArgumentParser(
-        description="MNIST-O baseline과 reconstruction multitask 실험을 실행합니다."
+        description="MNIST 평가기와 MNIST-O baseline·multitask 실험을 실행합니다."
     )
     parser.add_argument(
         "--model",
-        choices=("baseline", "multitask", "all"),
+        choices=("mnist", "baseline", "multitask", "all"),
         default="all",
-        help="실행할 모델입니다. 기본값은 두 모델을 순서대로 실행하는 all입니다.",
+        help="실행할 모델입니다. all은 평가기, baseline, multitask 순서입니다.",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument(

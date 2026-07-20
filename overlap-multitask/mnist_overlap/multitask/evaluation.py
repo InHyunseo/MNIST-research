@@ -20,11 +20,13 @@ from ..metrics import (
     hierarchical_bootstrap_interval,
     sample_deviation,
 )
-from .config import CHECKPOINT_DIR, METRICS_JSON_PATH, MultitaskConfig
-from .losses import (
-    foreground_dice_per_sample,
-    source_reconstruction_loss,
+from ..mnist_classifier import (
+    MnistClassifier,
+    classifier_fingerprint,
+    load_mnist_classifier,
+    reconstruction_accuracy_per_sample,
 )
+from .config import CHECKPOINT_DIR, METRICS_JSON_PATH, MultitaskConfig
 from .model import MultitaskMnistONet
 from .training import load_checkpoint
 
@@ -40,11 +42,7 @@ METADATA_FIELD_NAMES = (
     "pixel_overlap_ratio",
 )
 RECONSTRUCTION_METRIC_NAMES = (
-    "foreground_dice",
-    "balanced_bce",
-    "l1",
-    "mse",
-    "psnr",
+    "reconstruction_accuracy",
 )
 
 
@@ -60,6 +58,7 @@ class MultitaskPredictor:
         self.config = config
         self.reconstruction_loss_weight = reconstruction_loss_weight
         self.device = device
+        self.mnist_classifier: MnistClassifier | None = None
 
     def collect_all_seeds(
         self,
@@ -73,6 +72,13 @@ class MultitaskPredictor:
             shuffle=False,
             num_workers=0,
         )
+        try:
+            self.mnist_classifier = load_mnist_classifier(self.device)
+        except FileNotFoundError as error:
+            raise FileNotFoundError(
+                "복원 평가용 MNIST 분류기가 없습니다. 먼저 "
+                "`python main.py --model mnist --device cuda`를 실행하세요."
+            ) from error
         predictions_by_seed = {}
         for training_seed in training_seeds:
             model = self.load_model(training_seed)
@@ -99,7 +105,9 @@ class MultitaskPredictor:
         model: MultitaskMnistONet,
         test_loader: DataLoader,
     ) -> dict[str, np.ndarray]:
-        """한 모델의 분류 logit·metadata와 class별 복원 오차를 array로 모은다."""
+        """분류 logit·metadata와 pixel·숫자 인식 복원 지표를 array로 모은다."""
+        if self.mnist_classifier is None:
+            raise RuntimeError("복원 평가용 MNIST 분류기가 준비되지 않았습니다.")
         collected_columns: dict[str, list[np.ndarray]] = {
             "logits": [],
             "labels": [],
@@ -112,17 +120,12 @@ class MultitaskPredictor:
         for batch in test_loader:
             images = batch["image"].to(self.device)
             source_images = batch["source_images"].to(self.device)
-            reconstruction_targets = batch["reconstruction_targets"].to(self.device)
             source_offsets = batch["source_offsets"].to(self.device)
             reconstruction_classes = torch.stack((
                 batch["label_first"],
                 batch["label_second"],
             ), dim=1).to(self.device)
             output = model(images, reconstruction_classes)
-            reconstruction_result = source_reconstruction_loss(
-                output.reconstruction_logits,
-                reconstruction_targets,
-            )
             source_reconstructions = torch.sigmoid(
                 output.reconstruction_logits
             )
@@ -131,14 +134,12 @@ class MultitaskPredictor:
                 source_offsets,
                 source_images.shape[-1],
             )
-            absolute_error = torch.abs(cropped_reconstructions - source_images)
-            squared_error = torch.square(cropped_reconstructions - source_images)
-            l1_per_sample = absolute_error.mean(dim=(1, 2, 3))
-            mse_per_sample = squared_error.mean(dim=(1, 2, 3))
-            psnr_per_sample = -10.0 * torch.log10(mse_per_sample.clamp_min(1e-12))
-            dice_per_sample = foreground_dice_per_sample(
-                source_reconstructions,
-                reconstruction_targets,
+            reconstruction_logits = self.mnist_classifier(
+                cropped_reconstructions.reshape(-1, 1, 28, 28)
+            ).reshape(-1, 2, CLASS_COUNT)
+            reconstruction_accuracy = reconstruction_accuracy_per_sample(
+                reconstruction_logits,
+                reconstruction_classes,
             )
 
             collected_columns["logits"].append(output.logits.cpu().numpy())
@@ -146,15 +147,9 @@ class MultitaskPredictor:
             collected_columns["overlap_level"].append(
                 np.asarray(batch["overlap_level"])
             )
-            collected_columns["balanced_bce"].append(
-                reconstruction_result.balanced_bce_per_sample.cpu().numpy()
+            collected_columns["reconstruction_accuracy"].append(
+                reconstruction_accuracy.cpu().numpy()
             )
-            collected_columns["foreground_dice"].append(
-                dice_per_sample.cpu().numpy()
-            )
-            collected_columns["l1"].append(l1_per_sample.cpu().numpy())
-            collected_columns["mse"].append(mse_per_sample.cpu().numpy())
-            collected_columns["psnr"].append(psnr_per_sample.cpu().numpy())
 
             for field_name in METADATA_FIELD_NAMES:
                 collected_columns[field_name].append(batch[field_name].numpy())
@@ -217,6 +212,12 @@ class ComparisonEvaluator:
             "composition_mode": COMPOSITION_MODE,
             "training_seeds": training_seeds,
             "reconstruction_loss_weight": reconstruction_loss_weight,
+            "reconstruction_recognition": {
+                "evaluator": "FrozenCleanMnistLeNet",
+                "evaluator_fingerprint": classifier_fingerprint(),
+                "conditioning": "ground_truth_source_classes",
+                "primary_metric": "reconstruction_accuracy",
+            },
             "bootstrap_iterations": self.config.baseline.evaluation.bootstrap_iterations,
             "confidence_level": CONFIDENCE_LEVEL,
             "classification_performance": {
@@ -244,13 +245,13 @@ class ComparisonEvaluator:
                 f"{difference['confidence_upper'] * 100:+.2f}]"
             )
 
-        high_reconstruction = metrics["reconstruction_performance"]["high"]
-        print(
-            "\n[Multitask reconstruction — High] "
-            f"Dice={high_reconstruction['foreground_dice_mean']:.4f}, "
-            f"crop-L1={high_reconstruction['l1_mean']:.4f}, "
-            f"PSNR={high_reconstruction['psnr_mean']:.2f} dB"
-        )
+        print("\n[Multitask reconstruction accuracy]")
+        for level in ("all", *OVERLAP_LEVELS):
+            reconstruction = metrics["reconstruction_performance"][level]
+            print(
+                f"  {level:8} "
+                f"accuracy={reconstruction['reconstruction_accuracy_mean'] * 100:6.2f}%"
+            )
 
     def save(self, metrics: dict[str, Any]) -> None:
         """비교 결과를 UTF-8 JSON으로 원자 저장한다."""
@@ -421,7 +422,7 @@ class ComparisonEvaluator:
         predictions_by_seed: dict[int, dict[str, np.ndarray]],
         training_seeds: list[int],
     ) -> dict[str, dict[str, float]]:
-        """전체·overlap별 다섯 복원 지표의 seed 평균·표본 std를 계산한다."""
+        """전체·overlap별 복원 exact-match의 seed 평균·표본 std를 계산한다."""
         performance = {}
         for level in ("all", *OVERLAP_LEVELS):
             entry = {}

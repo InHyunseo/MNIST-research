@@ -1,4 +1,4 @@
-"""학습 곡선·baseline 비교·pair 분석·복원 예시 그림 다섯 장을 생성한다."""
+"""학습 곡선·baseline 비교·pair 분석·복원 예시와 진단 그림을 생성한다."""
 
 from __future__ import annotations
 
@@ -23,7 +23,6 @@ from .model import MultitaskMnistONet
 FIGURE_DPI = 150
 BASELINE_COLOR = "#4C78A8"
 MULTITASK_COLOR = "#F58518"
-MULTITASK_MEAN_COLOR = "#9C3B00"
 EXAMPLE_CLASS_PAIR = (3, 8)
 
 
@@ -37,13 +36,14 @@ class ComparisonVisualizer:
         example_model: MultitaskMnistONet,
         device: torch.device,
     ) -> None:
-        """학습·overlap·pair·confusion·복원 그림 다섯 장을 저장한다."""
+        """학습·분류·복원 정확도와 복원 예시·진단 그림을 저장한다."""
         FIGURE_DIR.mkdir(parents=True, exist_ok=True)
         self.draw_training_curves(metrics["training_seeds"])
         self.draw_overlap_comparison(metrics)
         self.draw_pair_accuracy_difference(metrics)
         self.draw_pair_confusion_high(metrics)
         self.draw_reconstruction_examples(test_dataset, example_model, device)
+        self.draw_reconstruction_ablation(test_dataset, example_model, device)
 
     def draw_training_curves(self, training_seeds: list[int]) -> None:
         """열 seed의 validation accuracy·total loss와 epoch별 평균을 그린다."""
@@ -51,8 +51,6 @@ class ComparisonVisualizer:
             [TRAINING_LOG_DIR / f"seed_{seed}.csv" for seed in training_seeds],
             accuracy_column="validation_exact_match",
             loss_column="validation_total_loss",
-            line_color=MULTITASK_COLOR,
-            mean_color=MULTITASK_MEAN_COLOR,
             output_path=FIGURE_DIR / "training_curves.png",
             figure_dpi=FIGURE_DPI,
         )
@@ -261,6 +259,90 @@ class ComparisonVisualizer:
         )
         plt.close(figure)
 
+    @torch.no_grad()
+    def draw_reconstruction_ablation(
+        self,
+        test_dataset: ControlledOverlapMnistDataset,
+        model: MultitaskMnistONet,
+        device: torch.device,
+    ) -> None:
+        """정상 class feature와 0으로 제거한 경우의 복원을 나란히 비교한다."""
+        example_indices = self._select_paired_examples(test_dataset, EXAMPLE_CLASS_PAIR)
+        first_sample = test_dataset[example_indices[0]]
+        first_class = int(first_sample["label_first"])
+        second_class = int(first_sample["label_second"])
+        column_titles = (
+            "Mixed",
+            f"GT {first_class}",
+            f"GT {second_class}",
+            f"Normal {first_class}",
+            f"Zero {first_class}",
+            f"Normal {second_class}",
+            f"Zero {second_class}",
+        )
+        model.eval()
+        figure, axes = plt.subplots(
+            len(OVERLAP_LEVELS),
+            len(column_titles),
+            figsize=(14.0, 6.2),
+            constrained_layout=True,
+            squeeze=False,
+        )
+
+        for row_index, (level, dataset_index) in enumerate(
+            zip(OVERLAP_LEVELS, example_indices)
+        ):
+            sample = test_dataset[dataset_index]
+            images = sample["image"].unsqueeze(0).to(device)
+            reconstruction_classes = torch.tensor(
+                [[sample["label_first"], sample["label_second"]]],
+                device=device,
+            )
+            normal_maps, zero_feature_maps = _reconstruction_ablation_maps(
+                model,
+                images,
+                reconstruction_classes,
+            )
+            source_offsets = sample["source_offsets"].unsqueeze(0).to(device)
+            source_size = sample["source_images"].shape[-1]
+            normal_crops = crop_source_images(
+                normal_maps,
+                source_offsets,
+                source_size,
+            )[0].cpu()
+            zero_feature_crops = crop_source_images(
+                zero_feature_maps,
+                source_offsets,
+                source_size,
+            )[0].cpu()
+            displayed_images = (
+                sample["image"][0],
+                sample["source_images"][0],
+                sample["source_images"][1],
+                normal_crops[0],
+                zero_feature_crops[0],
+                normal_crops[1],
+                zero_feature_crops[1],
+            )
+
+            for column_index, displayed_image in enumerate(displayed_images):
+                axis = axes[row_index, column_index]
+                axis.imshow(displayed_image.numpy(), cmap="gray", vmin=0.0, vmax=1.0)
+                axis.set_xticks([])
+                axis.set_yticks([])
+                if row_index == 0:
+                    axis.set_title(column_titles[column_index])
+                if column_index == 0:
+                    axis.set_ylabel(level.title())
+
+        figure.suptitle("Feature Ablation")
+        figure.savefig(
+            FIGURE_DIR / "reconstruction_ablation.png",
+            dpi=FIGURE_DPI,
+            bbox_inches="tight",
+        )
+        plt.close(figure)
+
     @staticmethod
     def _select_paired_examples(
         test_dataset: ControlledOverlapMnistDataset,
@@ -288,3 +370,24 @@ class ComparisonVisualizer:
             if len(selected_indices) == len(OVERLAP_LEVELS):
                 return selected_indices
         raise ValueError(f"숫자 조합 {class_pair}의 완전한 paired sample이 없습니다.")
+
+
+def _reconstruction_ablation_maps(
+    model: MultitaskMnistONet,
+    images: torch.Tensor,
+    reconstruction_classes: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """동일 one-hot 조건에서 정상 feature와 zero feature의 복원 확률을 반환한다."""
+    bottleneck = model.classifier.encode(images)
+    class_latents = model.reconstruction_head.latent_encoder(bottleneck)
+    batch_indices = torch.arange(images.shape[0], device=images.device).unsqueeze(1)
+    selected_latents = class_latents[batch_indices, reconstruction_classes]
+    normal_logits = model.reconstruction_head.decoder(
+        selected_latents,
+        reconstruction_classes,
+    )
+    zero_feature_logits = model.reconstruction_head.decoder(
+        torch.zeros_like(selected_latents),
+        reconstruction_classes,
+    )
+    return torch.sigmoid(normal_logits), torch.sigmoid(zero_feature_logits)

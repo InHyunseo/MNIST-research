@@ -10,12 +10,15 @@ import numpy as np
 from matplotlib.ticker import MaxNLocator
 
 
+ACCURACY_COLOR = "#1f77b4"
+LOSS_COLOR = "#ff7f0e"
+MEAN_LINE_WIDTH = 2.4
+
+
 def draw_training_curves(
     history_paths: list[Path],
     accuracy_column: str,
     loss_column: str,
-    line_color: str,
-    mean_color: str,
     output_path: Path,
     figure_dpi: int,
 ) -> None:
@@ -30,27 +33,30 @@ def draw_training_curves(
     epochs = np.arange(1, maximum_epoch + 1)
 
     figure, axes = plt.subplots(1, 2, figsize=(9.0, 3.8), sharex=True)
-    for axis, title, values in zip(
+    mean_lines = []
+    for axis, title, values, color in zip(
         axes,
         ("Val Accuracy", "Val Loss"),
         (accuracy_values, loss_values),
+        (ACCURACY_COLOR, LOSS_COLOR),
     ):
         for seed_values in values:
-            axis.plot(epochs, seed_values, color=line_color, alpha=0.28, linewidth=1.1)
+            axis.plot(epochs, seed_values, color=color, alpha=0.28, linewidth=1.1)
         mean_line, = axis.plot(
             epochs,
             np.nanmean(values, axis=0),
-            color=mean_color,
-            linewidth=3.0,
+            color=color,
+            linewidth=MEAN_LINE_WIDTH,
             label="Mean",
         )
+        mean_lines.append(mean_line)
         axis.set_title(title)
         axis.set_ylim(0.0, 1.0)
         axis.set_yticks(np.linspace(0.0, 1.0, 6))
         axis.xaxis.set_major_locator(MaxNLocator(integer=True))
         axis.grid(alpha=0.18)
 
-    axes[0].legend(handles=[mean_line], frameon=False, loc="lower right")
+    axes[0].legend(handles=[mean_lines[0]], frameon=False, loc="lower right")
     figure.supxlabel("Epoch")
     figure.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -19,6 +19,12 @@ from mnist_overlap.data import (
     render_overlap_sample,
 )
 from mnist_overlap.model import MnistONet
+from mnist_overlap.mnist_classifier import (
+    MnistClassifier,
+    classifier_fingerprint,
+    load_mnist_classifier,
+    reconstruction_accuracy_per_sample,
+)
 from mnist_overlap.multitask.config import (
     CHECKPOINT_DIR as MULTITASK_CHECKPOINT_DIR,
     ReconstructionConfig,
@@ -106,6 +112,50 @@ class DatasetContractTest(unittest.TestCase):
             28,
         )[0]
         self.assertTrue(torch.equal(recovered_sources, multitask_sample["source_images"]))
+
+
+class MnistClassifierTest(unittest.TestCase):
+    """독립 복원 평가기의 shape·정확도·동결 계약을 검사한다."""
+
+    def test_classifier_output_shape(self) -> None:
+        logits = MnistClassifier()(torch.rand(3, 1, 28, 28))
+        self.assertEqual(tuple(logits.shape), (3, 10))
+
+    def test_reconstruction_accuracy_requires_both_digits_regardless_of_order(self) -> None:
+        labels = torch.tensor([[3, 8], [1, 7], [1, 7]])
+        logits = torch.zeros(3, 2, 10)
+        logits[0, 0, 3] = 1.0
+        logits[0, 1, 8] = 1.0
+        logits[1, 0, 7] = 1.0
+        logits[1, 1, 1] = 1.0
+        logits[2, 0, 1] = 1.0
+        logits[2, 1, 2] = 1.0
+
+        reconstruction_accuracy = reconstruction_accuracy_per_sample(logits, labels)
+        self.assertTrue(torch.equal(
+            reconstruction_accuracy,
+            torch.tensor([1.0, 1.0, 0.0]),
+        ))
+
+    def test_loaded_classifier_is_frozen(self) -> None:
+        model = MnistClassifier()
+        checkpoint = {
+            "completed": True,
+            "fingerprint": classifier_fingerprint(),
+            "model_state_dict": model.state_dict(),
+            "best_epoch": 1,
+            "validation_accuracy": 0.99,
+        }
+        with TemporaryDirectory() as temporary_directory:
+            checkpoint_path = Path(temporary_directory) / "checkpoint.pt"
+            torch.save(checkpoint, checkpoint_path)
+            loaded = load_mnist_classifier(
+                torch.device("cpu"), checkpoint_path=checkpoint_path
+            )
+        self.assertFalse(loaded.training)
+        self.assertTrue(all(
+            not parameter.requires_grad for parameter in loaded.parameters()
+        ))
 
 
 class MultitaskModelTest(unittest.TestCase):
