@@ -32,22 +32,10 @@ class MnistONet(nn.Module):
 
     def encode(self, images: torch.Tensor) -> torch.Tensor:
         """`[batch, 1, 76, 76]` 입력을 `[batch, 16, 16, 16]` feature로 변환한다."""
-        return self.encode_with_skips(images)[-1]
-
-    def encode_with_skips(
-        self,
-        images: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """기존 LeNet 계산에서 U-Net skip용 세 spatial feature를 반환한다.
-
-        반환 shape는 차례로 `[batch,6,72,72]`, `[batch,16,32,32]`,
-        `[batch,16,16,16]`이다. 기존 `layers.*` parameter 구성은 바꾸지 않는다.
-        """
-        high_resolution = self.layers[1](self.layers[0](images))
-        pooled_high_resolution = self.layers[2](high_resolution)
-        middle_resolution = self.layers[4](self.layers[3](pooled_high_resolution))
-        bottleneck = self.layers[5](middle_resolution)
-        return high_resolution, middle_resolution, bottleneck
+        features = images
+        for layer_index in range(6):
+            features = self.layers[layer_index](features)
+        return features
 
     def classify_features(self, features: torch.Tensor) -> torch.Tensor:
         """Encoder feature를 기존 fully-connected head의 10개 logit으로 변환한다."""

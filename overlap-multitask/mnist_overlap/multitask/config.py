@@ -14,25 +14,28 @@ from ..config import PROJECT_ROOT, ExperimentConfig, config_fingerprint, load_co
 
 
 DEFAULT_MULTITASK_CONFIG_PATH = PROJECT_ROOT / "configs" / "mnist_multitask.yaml"
-MULTITASK_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "multitask_unet"
+MULTITASK_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "multitask_compact"
 PILOT_OUTPUT_DIR = MULTITASK_OUTPUT_DIR / "pilot"
 PILOT_SELECTION_PATH = PILOT_OUTPUT_DIR / "selection.json"
 CHECKPOINT_DIR = MULTITASK_OUTPUT_DIR / "checkpoints"
 TRAINING_LOG_DIR = MULTITASK_OUTPUT_DIR / "training"
-RESULTS_DIR = PROJECT_ROOT / "results" / "multitask_unet"
+RESULTS_DIR = PROJECT_ROOT / "results" / "multitask_compact"
 FIGURE_DIR = RESULTS_DIR / "figures"
 METRICS_JSON_PATH = RESULTS_DIR / "metrics.json"
 PILOT_SEED = 0
 LOSS_WEIGHT_CANDIDATES = (0.05, 0.1, 0.2)
 
 DECODER_CONTRACT = {
-    "architecture": "lenet_encoder_semantic_unet_expansive_path_v3",
-    "skip_shapes": [[6, 72, 72], [16, 32, 32]],
+    "architecture": "lenet_class_conditioned_compact_decoder_v4",
     "bottleneck_shape": [16, 16, 16],
-    "decoder_channels": [32, 16, 6],
-    "output_shape": [10, 64, 64],
-    "target": "class_specific_spatial_source_maps",
-    "loss": "balanced_bce_plus_active_dice",
+    "class_latent_count": 10,
+    "class_latent_dimension": 32,
+    "class_condition_dimension": 10,
+    "decoder_hidden_dimensions": [512, 1024],
+    "output_shape": [2, 64, 64],
+    "skip_connections": False,
+    "target": "source_ordered_spatial_maps",
+    "loss": "balanced_bce_plus_source_dice",
 }
 
 

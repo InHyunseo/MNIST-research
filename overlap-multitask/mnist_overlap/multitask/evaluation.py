@@ -22,8 +22,8 @@ from ..metrics import (
 )
 from .config import CHECKPOINT_DIR, METRICS_JSON_PATH, MultitaskConfig
 from .losses import (
-    active_foreground_dice_per_sample,
-    semantic_reconstruction_loss,
+    foreground_dice_per_sample,
+    source_reconstruction_loss,
 )
 from .model import MultitaskMnistONet
 from .training import load_checkpoint
@@ -114,18 +114,17 @@ class MultitaskPredictor:
             source_images = batch["source_images"].to(self.device)
             reconstruction_targets = batch["reconstruction_targets"].to(self.device)
             source_offsets = batch["source_offsets"].to(self.device)
-            output = model(images)
-            reconstruction_result = semantic_reconstruction_loss(
+            reconstruction_classes = torch.stack((
+                batch["label_first"],
+                batch["label_second"],
+            ), dim=1).to(self.device)
+            output = model(images, reconstruction_classes)
+            reconstruction_result = source_reconstruction_loss(
                 output.reconstruction_logits,
                 reconstruction_targets,
             )
-            reconstruction_probabilities = torch.sigmoid(
+            source_reconstructions = torch.sigmoid(
                 output.reconstruction_logits
-            )
-            source_reconstructions = select_source_class_maps(
-                reconstruction_probabilities,
-                batch["label_first"].to(self.device),
-                batch["label_second"].to(self.device),
             )
             cropped_reconstructions = crop_source_images(
                 source_reconstructions,
@@ -137,8 +136,8 @@ class MultitaskPredictor:
             l1_per_sample = absolute_error.mean(dim=(1, 2, 3))
             mse_per_sample = squared_error.mean(dim=(1, 2, 3))
             psnr_per_sample = -10.0 * torch.log10(mse_per_sample.clamp_min(1e-12))
-            dice_per_sample = active_foreground_dice_per_sample(
-                reconstruction_probabilities,
+            dice_per_sample = foreground_dice_per_sample(
+                source_reconstructions,
                 reconstruction_targets,
             )
 
@@ -213,7 +212,7 @@ class ComparisonEvaluator:
         return {
             "models": {
                 "baseline": "MnistONet",
-                "multitask": "MnistONet+SemanticUNetDecoder",
+                "multitask": "MnistONet+CompactLatentDecoder",
             },
             "composition_mode": COMPOSITION_MODE,
             "training_seeds": training_seeds,
@@ -487,24 +486,6 @@ class ComparisonEvaluator:
             [None if not np.isfinite(value) else float(value) for value in row]
             for row in matrix
         ]
-
-
-def select_source_class_maps(
-    semantic_maps: torch.Tensor,
-    label_first: torch.Tensor,
-    label_second: torch.Tensor,
-) -> torch.Tensor:
-    """각 sample의 두 정답 class channel을 `[batch,2,H,W]` 순서로 선택한다."""
-    batch_size = semantic_maps.shape[0]
-    if semantic_maps.ndim != 4 or semantic_maps.shape[1] != CLASS_COUNT:
-        raise ValueError("Semantic map은 `[batch,10,height,width]` 형태여야 합니다.")
-    if tuple(label_first.shape) != (batch_size,) or tuple(label_second.shape) != (
-        batch_size,
-    ):
-        raise ValueError("Class label은 `[batch]` 형태여야 합니다.")
-    class_indices = torch.stack((label_first, label_second), dim=1)
-    batch_indices = torch.arange(batch_size, device=semantic_maps.device).unsqueeze(1)
-    return semantic_maps[batch_indices, class_indices]
 
 
 def crop_source_images(

@@ -16,7 +16,7 @@ from ..config import CLASS_COUNT, OVERLAP_LEVELS
 from ..data import ControlledOverlapMnistDataset
 from ..training_plot import draw_training_curves
 from .config import FIGURE_DIR, TRAINING_LOG_DIR
-from .evaluation import crop_source_images, select_source_class_maps
+from .evaluation import crop_source_images
 from .model import MultitaskMnistONet
 
 
@@ -208,7 +208,9 @@ class ComparisonVisualizer:
             constrained_layout=True,
             squeeze=False,
         )
-        first_class, second_class = EXAMPLE_CLASS_PAIR
+        first_sample = test_dataset[example_indices[0]]
+        first_class = int(first_sample["label_first"])
+        second_class = int(first_sample["label_second"])
         column_titles = (
             "Mixed",
             f"GT {first_class}",
@@ -222,13 +224,12 @@ class ComparisonVisualizer:
         ):
             sample = test_dataset[dataset_index]
             images = sample["image"].unsqueeze(0).to(device)
-            output = model(images)
-            semantic_probabilities = torch.sigmoid(output.reconstruction_logits)
-            source_reconstructions = select_source_class_maps(
-                semantic_probabilities,
-                torch.tensor([sample["label_first"]], device=device),
-                torch.tensor([sample["label_second"]], device=device),
+            reconstruction_classes = torch.tensor(
+                [[sample["label_first"], sample["label_second"]]],
+                device=device,
             )
+            output = model(images, reconstruction_classes)
+            source_reconstructions = torch.sigmoid(output.reconstruction_logits)
             cropped_reconstructions = crop_source_images(
                 source_reconstructions,
                 sample["source_offsets"].unsqueeze(0).to(device),
@@ -271,10 +272,9 @@ class ComparisonVisualizer:
         pair_ids = test_dataset.manifest["pair_id"]
         overlap_levels = test_dataset.manifest["overlap_level"]
         first_class, second_class = class_pair
-        class_mask = (
-            ((label_first == first_class) & (label_second == second_class))
-            | ((label_first == second_class) & (label_second == first_class))
-        )
+        class_mask = (label_first == first_class) & (label_second == second_class)
+        if not np.any(class_mask):
+            class_mask = (label_first == second_class) & (label_second == first_class)
 
         for pair_id in dict.fromkeys(int(value) for value in pair_ids[class_mask]):
             selected_indices = []

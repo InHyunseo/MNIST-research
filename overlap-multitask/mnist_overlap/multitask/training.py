@@ -24,7 +24,7 @@ from .config import (
     multitask_config_fingerprint,
     pilot_weight_directory,
 )
-from .losses import semantic_reconstruction_loss
+from .losses import source_reconstruction_loss
 from .model import MultitaskMnistONet
 
 
@@ -67,11 +67,12 @@ def train_one_epoch(
         images = batch["image"].to(device)
         labels = batch["label"].to(device)
         reconstruction_targets = batch["reconstruction_targets"].to(device)
+        reconstruction_classes = _source_classes(batch, device)
 
         optimizer.zero_grad(set_to_none=True)
-        output = model(images)
+        output = model(images, reconstruction_classes)
         classification_loss = classification_loss_function(output.logits, labels)
-        reconstruction_result = semantic_reconstruction_loss(
+        reconstruction_result = source_reconstruction_loss(
             output.reconstruction_logits,
             reconstruction_targets,
         )
@@ -113,9 +114,10 @@ def evaluate_validation(
         images = batch["image"].to(device)
         labels = batch["label"].to(device)
         reconstruction_targets = batch["reconstruction_targets"].to(device)
-        output = model(images)
+        reconstruction_classes = _source_classes(batch, device)
+        output = model(images, reconstruction_classes)
         classification_loss = classification_loss_function(output.logits, labels)
-        reconstruction_result = semantic_reconstruction_loss(
+        reconstruction_result = source_reconstruction_loss(
             output.reconstruction_logits,
             reconstruction_targets,
         )
@@ -228,7 +230,9 @@ def train_model(
                     "config_fingerprint": experiment_fingerprint,
                     "training_complete": False,
                     "classifier_state_dict": model.classifier.state_dict(),
-                    "decoder_state_dict": model.decoder.state_dict(),
+                    "reconstruction_head_state_dict": (
+                        model.reconstruction_head.state_dict()
+                    ),
                 }, checkpoint_path)
             else:
                 epochs_without_improvement += 1
@@ -245,7 +249,9 @@ def train_model(
     epochs_run = epoch
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     model.classifier.load_state_dict(checkpoint["classifier_state_dict"])
-    model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+    model.reconstruction_head.load_state_dict(
+        checkpoint["reconstruction_head_state_dict"]
+    )
     checkpoint["epochs_run"] = epochs_run
     checkpoint["training_complete"] = True
     save_checkpoint_atomically(checkpoint, checkpoint_path)
@@ -387,7 +393,7 @@ def load_checkpoint(
     config: MultitaskConfig,
     reconstruction_loss_weight: float,
 ) -> dict[str, Any]:
-    """호환되는 완료 checkpoint를 classifier와 decoder에 복원한다."""
+    """호환되는 완료 checkpoint를 classifier와 reconstruction head에 복원한다."""
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     expected_fingerprint = multitask_config_fingerprint(
         config, reconstruction_loss_weight
@@ -397,7 +403,9 @@ def load_checkpoint(
     if checkpoint.get("training_complete") is not True:
         raise ValueError(f"정상 종료되지 않은 multitask checkpoint입니다: {checkpoint_path}")
     model.classifier.load_state_dict(checkpoint["classifier_state_dict"])
-    model.decoder.load_state_dict(checkpoint["decoder_state_dict"])
+    model.reconstruction_head.load_state_dict(
+        checkpoint["reconstruction_head_state_dict"]
+    )
     model.to(device)
     return checkpoint
 
@@ -487,6 +495,14 @@ def _write_json_atomically(payload: dict[str, Any], path: Path) -> None:
         encoding="utf-8",
     )
     temporary_path.replace(path)
+
+
+def _source_classes(batch: dict[str, Any], device: torch.device) -> torch.Tensor:
+    """Batch의 first/second label을 source 순서의 `[B,2]` tensor로 묶는다."""
+    return torch.stack(
+        (batch["label_first"], batch["label_second"]),
+        dim=1,
+    ).to(device=device, dtype=torch.int64)
 
 
 def _empty_epoch_totals() -> dict[str, float]:

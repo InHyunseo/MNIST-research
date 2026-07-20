@@ -1,4 +1,4 @@
-"""Baseline 호환성과 multitask 모델·loss·gradient 계약을 검증한다."""
+"""Baseline 호환성과 compact latent multitask 계약을 검증한다."""
 
 from __future__ import annotations
 
@@ -25,15 +25,17 @@ from mnist_overlap.multitask.config import (
     load_multitask_config,
     multitask_config_fingerprint,
 )
-from mnist_overlap.multitask.evaluation import (
-    crop_source_images,
-    select_source_class_maps,
-)
+from mnist_overlap.multitask.evaluation import crop_source_images
 from mnist_overlap.multitask.losses import (
-    active_foreground_dice_per_sample,
-    semantic_reconstruction_loss,
+    foreground_dice_per_sample,
+    source_reconstruction_loss,
 )
-from mnist_overlap.multitask.model import MultitaskMnistONet
+from mnist_overlap.multitask.model import (
+    CLASS_LATENT_DIMENSION,
+    ClassLatentEncoder,
+    MultitaskMnistONet,
+    SharedReconstructionDecoder,
+)
 from mnist_overlap.multitask.training import (
     load_checkpoint,
     select_reconstruction_loss_weight,
@@ -92,55 +94,76 @@ class DatasetContractTest(unittest.TestCase):
         self.assertEqual(tuple(multitask_sample["source_images"].shape), (2, 28, 28))
         self.assertEqual(
             tuple(multitask_sample["reconstruction_targets"].shape),
-            (CLASS_COUNT, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE),
+            (2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE),
         )
         self.assertEqual(tuple(multitask_sample["source_offsets"].shape), (2, 2))
         self.assertTrue(torch.equal(baseline_sample["image"], multitask_sample["image"]))
         self.assertTrue(torch.equal(baseline_sample["label"], multitask_sample["label"]))
 
-        source_maps = select_source_class_maps(
-            multitask_sample["reconstruction_targets"].unsqueeze(0),
-            torch.tensor([multitask_sample["label_first"]]),
-            torch.tensor([multitask_sample["label_second"]]),
-        )
         recovered_sources = crop_source_images(
-            source_maps,
+            multitask_sample["reconstruction_targets"].unsqueeze(0),
             multitask_sample["source_offsets"].unsqueeze(0),
             28,
         )[0]
         self.assertTrue(torch.equal(recovered_sources, multitask_sample["source_images"]))
-        active_classes = (
-            multitask_sample["reconstruction_targets"].sum(dim=(1, 2)) > 0
-        )
-        self.assertEqual(int(active_classes.sum()), 2)
 
 
 class MultitaskModelTest(unittest.TestCase):
-    """Decoder shape·초기화와 두 loss의 gradient 경로를 검사한다."""
+    """Compact latent shape·초기화와 두 loss의 gradient 경로를 검사한다."""
 
-    def test_encoder_skip_shapes_match_unet_contract(self) -> None:
-        features = MnistONet().encode_with_skips(torch.rand(2, 1, 76, 76))
-        self.assertEqual(tuple(features[0].shape), (2, 6, 72, 72))
-        self.assertEqual(tuple(features[1].shape), (2, 16, 32, 32))
-        self.assertEqual(tuple(features[2].shape), (2, 16, 16, 16))
+    def test_class_latent_and_output_shapes(self) -> None:
+        images = torch.rand(2, 1, 76, 76)
+        classes = torch.tensor([[3, 8], [1, 7]])
+        model = MultitaskMnistONet()
+        bottleneck = model.classifier.encode(images)
+        class_latents = model.reconstruction_head.latent_encoder(bottleneck)
+        output = model(images, classes)
 
-    def test_output_shape_and_probability_range(self) -> None:
-        output = MultitaskMnistONet()(torch.rand(2, 1, 76, 76))
-        self.assertEqual(tuple(output.logits.shape), (2, 10))
+        self.assertEqual(
+            tuple(class_latents.shape),
+            (2, CLASS_COUNT, CLASS_LATENT_DIMENSION),
+        )
+        self.assertEqual(tuple(output.logits.shape), (2, CLASS_COUNT))
         self.assertEqual(
             tuple(output.reconstruction_logits.shape),
-            (2, CLASS_COUNT, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE),
+            (2, 2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE),
         )
-        probabilities = torch.sigmoid(output.reconstruction_logits)
+        self.assertTrue(torch.equal(output.reconstruction_classes, classes))
+        probabilities = torch.sigmoid(output.reconstruction_logits).detach()
         self.assertGreaterEqual(float(probabilities.min()), 0.0)
         self.assertLessEqual(float(probabilities.max()), 1.0)
 
-    def test_decoder_is_fully_convolutional(self) -> None:
-        decoder = MultitaskMnistONet().decoder
-        self.assertFalse(any(
-            isinstance(module, (torch.nn.Flatten, torch.nn.Linear))
-            for module in decoder.modules()
+    def test_decoder_is_shared_mlp_without_skip_convolutions(self) -> None:
+        model = MultitaskMnistONet()
+        decoder = model.reconstruction_head.decoder
+        self.assertIsInstance(decoder, SharedReconstructionDecoder)
+        self.assertTrue(any(
+            isinstance(module, torch.nn.Linear) for module in decoder.modules()
         ))
+        self.assertFalse(any(
+            isinstance(module, (torch.nn.Conv2d, torch.nn.ConvTranspose2d))
+            for module in model.reconstruction_head.modules()
+        ))
+
+    def test_default_reconstruction_classes_are_classifier_top_two(self) -> None:
+        model = MultitaskMnistONet()
+        output = model(torch.rand(2, 1, 76, 76))
+        expected_classes = torch.topk(output.logits, k=2, dim=1).indices
+        self.assertTrue(torch.equal(output.reconstruction_classes, expected_classes))
+
+    def test_invalid_reconstruction_classes_are_rejected(self) -> None:
+        model = MultitaskMnistONet()
+        images = torch.rand(2, 1, 76, 76)
+        invalid_values = (
+            torch.tensor([[3, 3], [1, 7]]),
+            torch.tensor([[3, 10], [1, 7]]),
+            torch.tensor([3, 8]),
+            torch.tensor([[3.0, 8.0], [1.0, 7.0]]),
+        )
+        for invalid_classes in invalid_values:
+            with self.subTest(classes=invalid_classes):
+                with self.assertRaises(ValueError):
+                    model(images, invalid_classes)
 
     def test_classifier_initialization_matches_baseline_for_same_seed(self) -> None:
         set_random_seed(7)
@@ -157,13 +180,14 @@ class MultitaskModelTest(unittest.TestCase):
     def test_reconstruction_and_classification_gradient_routes(self) -> None:
         model = MultitaskMnistONet()
         images = torch.rand(2, 1, 76, 76)
+        classes = torch.tensor([[3, 8], [3, 8]])
         reconstruction_targets = torch.zeros(
-            2, CLASS_COUNT, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE
+            2, 2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE
         )
-        reconstruction_targets[:, 3, 4:20, 5:18] = 1.0
-        reconstruction_targets[:, 8, 30:48, 32:50] = 1.0
-        output = model(images)
-        reconstruction_loss = semantic_reconstruction_loss(
+        reconstruction_targets[:, 0, 4:20, 5:18] = 1.0
+        reconstruction_targets[:, 1, 30:48, 32:50] = 1.0
+        output = model(images, classes)
+        reconstruction_loss = source_reconstruction_loss(
             output.reconstruction_logits,
             reconstruction_targets,
         ).loss
@@ -171,29 +195,33 @@ class MultitaskModelTest(unittest.TestCase):
         self.assertIsNotNone(model.classifier.layers[0].weight.grad)
         self.assertIsNone(model.classifier.layers[7].weight.grad)
         self.assertTrue(any(
-            parameter.grad is not None for parameter in model.decoder.parameters()
+            parameter.grad is not None
+            for parameter in model.reconstruction_head.parameters()
         ))
 
         model.zero_grad(set_to_none=True)
-        output = model(images)
-        labels = torch.zeros(2, 10)
-        labels[:, :2] = 1.0
+        output = model(images, classes)
+        labels = torch.zeros(2, CLASS_COUNT)
+        labels[:, [3, 8]] = 1.0
         classification_loss = torch.nn.BCEWithLogitsLoss()(output.logits, labels)
         classification_loss.backward()
         self.assertIsNotNone(model.classifier.layers[0].weight.grad)
         self.assertIsNotNone(model.classifier.layers[7].weight.grad)
-        self.assertTrue(all(parameter.grad is None for parameter in model.decoder.parameters()))
+        self.assertTrue(all(
+            parameter.grad is None
+            for parameter in model.reconstruction_head.parameters()
+        ))
 
 
 class ReconstructionLossTest(unittest.TestCase):
-    """Semantic BCE·Dice가 class 의미와 foreground를 학습하는지 검사한다."""
+    """Source BCE·Dice가 foreground와 source identity를 학습하는지 검사한다."""
 
-    def test_semantic_loss_penalizes_blank_mixture_and_class_swap(self) -> None:
+    def test_source_loss_penalizes_blank_mixture_and_swap(self) -> None:
         reconstruction_targets = torch.zeros(
-            2, CLASS_COUNT, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE
+            2, 2, RECONSTRUCTION_SIZE, RECONSTRUCTION_SIZE
         )
-        reconstruction_targets[:, 3, 4:12, 5:13] = 1.0
-        reconstruction_targets[:, 8, 15:23, 16:24] = 1.0
+        reconstruction_targets[:, 0, 4:12, 5:13] = 1.0
+        reconstruction_targets[:, 1, 15:23, 16:24] = 1.0
         perfect_logits = torch.where(
             reconstruction_targets > 0,
             torch.full_like(reconstruction_targets, 12.0),
@@ -201,33 +229,30 @@ class ReconstructionLossTest(unittest.TestCase):
         )
         blank_logits = torch.full_like(reconstruction_targets, -12.0)
         mixed_foreground = torch.maximum(
-            reconstruction_targets[:, 3],
-            reconstruction_targets[:, 8],
+            reconstruction_targets[:, 0],
+            reconstruction_targets[:, 1],
         )
-        mixed_targets = torch.zeros_like(reconstruction_targets)
-        mixed_targets[:, 3] = mixed_foreground
-        mixed_targets[:, 8] = mixed_foreground
+        mixed_targets = torch.stack((mixed_foreground, mixed_foreground), dim=1)
         mixed_logits = torch.where(
             mixed_targets > 0,
             torch.full_like(mixed_targets, 12.0),
             torch.full_like(mixed_targets, -12.0),
         )
-        swapped_logits = perfect_logits.clone()
-        swapped_logits[:, [3, 8]] = perfect_logits[:, [8, 3]]
+        swapped_logits = perfect_logits[:, [1, 0]]
 
-        perfect = semantic_reconstruction_loss(perfect_logits, reconstruction_targets)
-        blank = semantic_reconstruction_loss(blank_logits, reconstruction_targets)
-        mixed = semantic_reconstruction_loss(mixed_logits, reconstruction_targets)
-        swapped = semantic_reconstruction_loss(swapped_logits, reconstruction_targets)
+        perfect = source_reconstruction_loss(perfect_logits, reconstruction_targets)
+        blank = source_reconstruction_loss(blank_logits, reconstruction_targets)
+        mixed = source_reconstruction_loss(mixed_logits, reconstruction_targets)
+        swapped = source_reconstruction_loss(swapped_logits, reconstruction_targets)
         self.assertGreater(float(blank.loss), float(perfect.loss))
         self.assertGreater(float(mixed.loss), float(perfect.loss))
         self.assertGreater(float(swapped.loss), float(perfect.loss))
 
-        perfect_dice = active_foreground_dice_per_sample(
+        perfect_dice = foreground_dice_per_sample(
             reconstruction_targets,
             reconstruction_targets,
         )
-        blank_dice = active_foreground_dice_per_sample(
+        blank_dice = foreground_dice_per_sample(
             torch.zeros_like(reconstruction_targets),
             reconstruction_targets,
         )
@@ -256,7 +281,7 @@ class MultitaskCheckpointTest(unittest.TestCase):
             ),
             "training_complete": False,
             "classifier_state_dict": model.classifier.state_dict(),
-            "decoder_state_dict": model.decoder.state_dict(),
+            "reconstruction_head_state_dict": model.reconstruction_head.state_dict(),
         }
 
         with TemporaryDirectory() as temporary_directory:
