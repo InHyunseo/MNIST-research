@@ -33,7 +33,7 @@ from src.dataset import NOISE_TYPES, PROJECT_DIRECTORY, create_data_loaders
 from src.model import DenoisingAuxiliaryLeNet
 
 
-RANDOM_SEEDS = (0, 1, 2, 3, 4)
+RANDOM_SEEDS = tuple(range(30))
 PILOT_SEED = 0
 RECONSTRUCTION_WEIGHT_CANDIDATES = (0.05, 0.1, 0.2)
 MAXIMUM_EPOCHS = 30
@@ -100,7 +100,7 @@ class TrainingResult:
 
 
 def run_baseline_experiments(device: torch.device) -> None:
-    """세 noise와 다섯 seed의 classification-only 실험을 실행한다."""
+    """세 noise와 30개 seed의 classification-only 실험을 실행한다."""
     _create_output_directories()
     for noise_type in NOISE_TYPES:
         for random_seed in RANDOM_SEEDS:
@@ -114,7 +114,7 @@ def run_baseline_experiments(device: torch.device) -> None:
 
 
 def run_multitask_experiments(device: torch.device) -> None:
-    """Noise별 reconstruction weight pilot 후 다섯 seed를 최종 학습한다."""
+    """Noise별 reconstruction weight pilot 후 30개 seed를 최종 학습한다."""
     _create_output_directories()
     selected_weights = {
         noise_type: _select_reconstruction_weight(noise_type, device)

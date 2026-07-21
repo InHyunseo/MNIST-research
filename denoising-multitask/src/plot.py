@@ -24,7 +24,12 @@ import numpy as np
 import pandas as pd
 
 from src.dataset import NOISE_TYPES, PROJECT_DIRECTORY
-from src.experiment import HISTORY_DIRECTORY, RESULT_COLUMNS, RESULTS_PATH
+from src.experiment import (
+    HISTORY_DIRECTORY,
+    RANDOM_SEEDS,
+    RESULT_COLUMNS,
+    RESULTS_PATH,
+)
 
 
 FIGURE_DIRECTORY = PROJECT_DIRECTORY / "outputs" / "figures"
@@ -58,17 +63,26 @@ def create_plots() -> None:
 
 
 def _validate_complete_conditions(results: pd.DataFrame) -> None:
-    """각 noise에서 baseline과 multitask 결과가 모두 존재하는지 확인한다."""
+    """각 noise·condition에 30개 seed 결과가 모두 존재하는지 확인한다."""
+    expected_seeds = set(RANDOM_SEEDS)
     for noise_type in NOISE_TYPES:
-        available_conditions = set(
-            results.loc[results["noise_type"] == noise_type, "condition"]
-        )
-        missing_conditions = set(CONDITIONS) - available_conditions
-        if missing_conditions:
-            missing_text = ", ".join(sorted(missing_conditions))
-            raise RuntimeError(
-                f"{noise_type} 결과에 필요한 condition이 없습니다: {missing_text}"
-            )
+        for condition in CONDITIONS:
+            condition_results = results.loc[
+                (results["noise_type"] == noise_type)
+                & (results["condition"] == condition)
+            ]
+            available_seeds = set(condition_results["random_seed"].astype(int))
+            if (
+                available_seeds != expected_seeds
+                or len(condition_results) != len(RANDOM_SEEDS)
+            ):
+                missing_seeds = sorted(expected_seeds - available_seeds)
+                unexpected_seeds = sorted(available_seeds - expected_seeds)
+                raise RuntimeError(
+                    f"완료되지 않은 결과입니다: noise={noise_type}, "
+                    f"condition={condition}, missing={missing_seeds}, "
+                    f"unexpected={unexpected_seeds}"
+                )
 
 
 def _plot_accuracy_comparison(results: pd.DataFrame) -> None:
@@ -170,13 +184,20 @@ def _plot_training_histories() -> None:
     minimum_accuracy = 1.0
     for noise_type in NOISE_TYPES:
         for condition in CONDITIONS:
-            history_paths = sorted(
-                HISTORY_DIRECTORY.glob(f"{noise_type}_{condition}_seed_*.csv")
-            )
-            if not history_paths:
+            history_paths = [
+                HISTORY_DIRECTORY
+                / f"{noise_type}_{condition}_seed_{random_seed}.csv"
+                for random_seed in RANDOM_SEEDS
+            ]
+            missing_history_paths = [
+                history_path
+                for history_path in history_paths
+                if not history_path.exists()
+            ]
+            if missing_history_paths:
                 raise FileNotFoundError(
-                    "최종 학습 history가 없습니다: "
-                    f"noise={noise_type}, condition={condition}"
+                    "최종 학습 history가 완료되지 않았습니다: "
+                    f"{missing_history_paths[0]}"
                 )
             histories = []
             for history_path in history_paths:
@@ -236,6 +257,8 @@ def _plot_spaghetti_history(
 
     figure, axes = plt.subplots(1, 2, figsize=(10, 4))
     colors = {"training": "#4C78A8", "validation": "#F58518"}
+    seed_count = history["random_seed"].nunique()
+    individual_alpha = min(0.42, 0.95 / np.sqrt(seed_count))
     metrics = (
         (
             "Loss",
@@ -260,14 +283,14 @@ def _plot_spaghetti_history(
                 seed_history[training_column],
                 color=colors["training"],
                 linewidth=1.1,
-                alpha=0.42,
+                alpha=individual_alpha,
             )
             axis.plot(
                 seed_history["epoch"],
                 seed_history[validation_column],
                 color=colors["validation"],
                 linewidth=1.1,
-                alpha=0.42,
+                alpha=individual_alpha,
             )
 
         mean_history = history.groupby("epoch", as_index=False)[

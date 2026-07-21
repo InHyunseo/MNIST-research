@@ -10,7 +10,7 @@ head를 사용하고 decoder 유무만 바꾼다.
 - Baseline: `encoder → classification head`
 - Multitask: `encoder → classification head + denoising decoder`
 - Loss: baseline은 cross-entropy, multitask는 `cross-entropy + λ × MSE`
-- Seeds: `0, 1, 2, 3, 4`
+- Seeds: `0–29`
 - Optimizer: Adam, learning rate `0.001`
 - Batch size: `128`, maximum epochs: `30`, validation ratio: `0.1`
 
