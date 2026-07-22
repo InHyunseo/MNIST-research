@@ -1,115 +1,166 @@
 # Denoising-Auxiliary Classification on n-MNIST
 
-노이즈가 있는 MNIST 분류에서 clean image 복원을 auxiliary task로 추가했을 때
-classification accuracy가 향상되는지 확인한다. 동일한 LeNet encoder와 classification
-head를 사용하고 decoder 유무만 바꾼다.
+노이즈가 포함된 MNIST 분류에서 clean image 복원을 보조 과제로 함께 학습하면
+분류 정확도가 향상되는지 확인한다. Baseline과 multitask 모델은 동일한 LeNet encoder와
+classification head를 사용하며, multitask 학습에만 denoising decoder와 MSE loss가
+추가된다. 추론 시에는 두 모델 모두 classification 경로만 사용한다.
 
-## 실험 조건
+## 데이터
 
-- Noise: AWGN, motion blur, reduced contrast + AWGN
-- Baseline: `encoder → classification head`
-- Multitask: `encoder → classification head + denoising decoder`
-- Edge multitask: 기존 multitask에 인접 픽셀의 가로·세로 차분 loss 추가
-- Loss: baseline은 cross-entropy, multitask는 `cross-entropy + λ × MSE`,
-  edge multitask는 `cross-entropy + λ × (MSE + β × Edge)`
-- Seeds: baseline과 multitask는 `0–29`, edge multitask는 탐색적으로 `0–9`
-- Optimizer: Adam, learning rate `0.001`
-- Batch size: `128`, maximum epochs: `30`, validation ratio: `0.1`
+[n-MNIST 배포본](https://www.csc.lsu.edu/~saikat/n-mnist/)의 세 noise 조건을 그대로
+사용한다. 각 조건은 MNIST와 동일하게 training image 60,000장과 test image 10,000장으로
+구성되며, noise의 종류와 강도는 배포본에 고정돼 있다.
 
-Multitask는 각 noise의 seed 0에서 `λ ∈ {0.05, 0.1, 0.2}`를 비교해 validation
-classification accuracy가 가장 높은 값을 선택한 뒤 모든 seed를 처음부터 학습한다.
-Edge multitask는 동일한 seed에서 위 λ와 `β ∈ {0, 0.05, 0.1, 0.2}`의 조합을
-비교한다. Edge loss는 복원 image와 clean target의 가로·세로 1차 차분 사이 L1
-loss의 평균이다. 동률이면 β와 λ가 작은 조합을 선택한다.
-
-n-MNIST의 noise 강도는 배포본에 다음과 같이 고정돼 있다.
-
-| Noise | 고정 조건 |
+| Noise | 배포본 설정 |
 |---|---|
 | AWGN | SNR 9.5 |
 | Motion blur | 이동 거리 5px, 반시계 방향 15° |
 | Reduced contrast + AWGN | Contrast 50%, SNR 12 |
 
-코드는 noise를 새로 생성하거나 강도를 변경하지 않고 배포된 noisy image를 그대로 사용한다.
+각 seed에서 training 60,000장을 54,000장 학습용과 6,000장 validation용으로 나눈다.
+Test 10,000장은 checkpoint 선택에 사용하지 않고 최종 평가에만 사용한다. 입력과 clean
+target은 같은 index의 이미지이며, `28×28` 영상을 양쪽에 2px씩 padding해 `1×32×32`로
+모델에 전달한다.
 
-## 모델 구조
+## 모델과 손실함수
 
-Backbone은 PyTorch 공식 Neural Networks tutorial에서 `LeNet`으로 제공하는 구현과
+Classification 경로는 PyTorch의 공식 `Neural Networks` tutorial에 제시된 LeNet 구현과
 동일하다.
 
 ```text
 Input 1×32×32
-  → Conv(1→6, 5×5) → ReLU → MaxPool2
-  → Conv(6→16, 5×5) → ReLU → MaxPool2
+  → Conv(1→6, 5×5) → ReLU → MaxPool(2×2)
+  → Conv(6→16, 5×5) → ReLU → MaxPool(2×2)
   → Flatten(400)
   → FC(400→120) → ReLU
   → FC(120→84) → ReLU
   → FC(84→10)
 ```
 
-원본 LeNet-5(1998)를 문자 그대로 재현한 것이 아니라 현대적 LeNet 구현이다.
-Multitask 모델은 두 번째 pooling의 `16×5×5` 출력을 shared bottleneck으로 사용해
-동일한 classification head와 denoising decoder로 분기한다.
-
-## 설치
-
-Python 3.10 이상 환경에서 dependency를 설치한다.
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-## 데이터 준비
-
-[LSU 공식 n-MNIST 배포 페이지](https://www.csc.lsu.edu/~saikat/n-mnist/)에서 받은
-archive 세 개를 `data/raw/`에 배치한다.
-
-n-MNIST를 사용한 결과를 보고할 때는 배포 페이지의 안내에 따라 Basu et al. (2015)을
-본문에서 인용하고 References에 전체 서지정보를 포함한다.
+이는 원본 LeNet-5(1998)의 activation과 subsampling을 문자 그대로 재현한 구조가 아니라,
+PyTorch tutorial의 현대적 LeNet 구현이다. Multitask 모델은 shared encoder의
+`16×5×5` feature에서 다음 decoder로 분기한다.
 
 ```text
-mnist-with-awgn.gz
-mnist-with-motion-blur.gz
-mnist-with-reduced-contrast-and-awgn.gz
+16×5×5 → ConvTranspose(16→6, 6×6, stride 2) → ReLU
+       → ConvTranspose(6→1, 6×6, stride 2) → 1×32×32
 ```
 
-다음 명령은 archive를 최초 한 번만 MAT로 추출하고 clean target을 준비한다.
+Baseline은 cross-entropy만 최소화한다. Multitask 모델의 손실은 다음과 같다.
 
-```bash
-python main.py data
+```text
+L = L_CE + λ × L_MSE
 ```
+
+각 noise의 seed 0에서 `λ ∈ {0.05, 0.10, 0.20}`을 비교하고 가장 높은 validation
+classification accuracy를 얻은 값을 선택했다. 동률이면 더 작은 λ를 사용한다.
+
+| Noise | 선택된 λ |
+|---|---:|
+| AWGN | 0.05 |
+| Motion blur | 0.10 |
+| Reduced contrast + AWGN | 0.10 |
+
+## 실험 설정
+
+| 항목 | 설정 |
+|---|---|
+| Seeds | 0–29, paired between conditions |
+| Optimizer | Adam, β₁=0.9, β₂=0.999 |
+| Learning rate | 0.001 |
+| Batch size | 128 |
+| Epochs | 30 |
+| Validation ratio | 0.1 |
+| AMP | 사용하지 않음 |
+| Checkpoint | 최고 validation classification accuracy epoch |
+
+모든 seed에서 baseline과 multitask가 같은 data split을 사용한다. Multitask 모델의
+decoder는 학습 때만 실행하며 test classification과 실제 추론에서는 건너뛴다.
+
+## 결과
+
+아래 값은 30개 seed의 test accuracy 평균 ± 표본 표준편차다. Δ는 같은 seed의
+`multitask − baseline` 정확도 차이를 percentage point 단위로 계산한 값이며, 신뢰구간과
+p-value는 paired t-test 기준이다.
+
+| Noise | Baseline | Multitask | Δ accuracy | 95% CI | p-value |
+|---|---:|---:|---:|---:|---:|
+| AWGN | 98.184 ± 0.121% | 98.186 ± 0.116% | +0.002 pp | [-0.052, +0.057] | 0.9305 |
+| Motion blur | 98.836 ± 0.102% | 98.898 ± 0.073% | +0.062 pp | [+0.024, +0.101] | 0.0026 |
+| Reduced contrast + AWGN | 96.745 ± 0.158% | 96.770 ± 0.201% | +0.025 pp | [-0.052, +0.102] | 0.5116 |
+
+복원 보조 과제는 Motion blur에서만 통계적으로 유의한 분류 성능 향상을 보였다. AWGN과
+Reduced contrast + AWGN에서는 평균 정확도가 소폭 증가했지만 신뢰구간이 0을 포함하므로
+일관된 개선으로 해석하지 않는다. 따라서 clean reconstruction이 모든 noise 조건에
+보편적으로 유효하다고 결론내릴 수는 없다.
 
 ## 실행
 
-Baseline과 multitask는 독립적으로 실행한다. `--device`는 `auto`, `cpu`, `cuda`를
-지원하며 기본값은 `auto`다.
+Python 3.10 이상 환경에서 dependency를 설치하고 아래 진입점만 사용한다.
 
 ```bash
+python -m pip install -r requirements.txt
+
+python main.py data
 python main.py train-baseline --device cuda
 python main.py train-multitask --device cuda
-python main.py train-edge --device cuda
 python main.py plot
 ```
 
-`plot`은 학습을 실행하지 않고 저장된 final result와 history만 읽는다.
+`--device`는 `auto`, `cpu`, `cuda`를 지원하며 기본값은 `auto`다. `plot`은 학습을
+실행하지 않고 준비된 data와 저장된 checkpoint, history 및 CSV 결과만 읽는다.
 
-## 출력
+## 파일 구조
 
 ```text
-outputs/
-├── checkpoints/       final run별 best-validation checkpoint
-├── histories/         final run별 epoch CSV
-├── figures/           accuracy 비교, delta와 seed-overlaid history figure
-├── pilot_results.csv  noise별 λ·β 후보의 validation 결과
-└── results.csv        final seed별 test classification 결과
+denoising-multitask/
+├── data/
+│   ├── raw/                 n-MNIST archive와 MAT
+│   └── mnist/               index가 대응되는 clean MNIST MAT
+├── outputs/
+│   ├── checkpoints/         final run별 best checkpoint
+│   ├── figures/             발표와 분석에 사용하는 PNG
+│   ├── histories/           final run별 epoch history
+│   ├── pilot_results.csv    noise별 λ pilot 결과
+│   └── results.csv          seed별 test classification 결과
+├── src/
+│   ├── dataset.py           데이터 준비와 DataLoader
+│   ├── model.py             shared encoder, classifier와 decoder
+│   ├── experiment.py        pilot, 학습, 평가와 결과 저장
+│   └── plot.py              최종 figure 생성
+├── .gitignore
+├── main.py                  단일 실행 진입점
+├── README.md
+└── requirements.txt
 ```
 
-Checkpoint는 validation classification accuracy로 선택하며 test set은 최종 평가에만
-사용한다. 완료된 현재 설정의 checkpoint가 있으면 다시 학습하지 않고 재사용한다.
+## Figure 목록
+
+`python main.py plot`은 아래 16개 파일만 생성하고, `outputs/figures/`의 다른 PNG는
+모든 figure가 정상 생성된 뒤 삭제한다.
+
+| 파일 | 내용 |
+|---|---|
+| `s1_cost.png` | Baseline과 multitask의 학습·추론 비용 |
+| `s2_lambda.png` | Noise별 λ pilot 결과 |
+| `s3_noise_grid.png` | 숫자 0–9의 clean·세 noise 비교 |
+| `s4_hparams.png` | 학습 hyperparameter |
+| `s5_awgn_base.png`, `s5_awgn_multi.png` | AWGN 학습 곡선 |
+| `s5_blur_base.png`, `s5_blur_multi.png` | Motion blur 학습 곡선 |
+| `s5_contrast_base.png`, `s5_contrast_multi.png` | Reduced contrast + AWGN 학습 곡선 |
+| `s6_recon.png` | 숫자 5·3의 noisy·reconstructed·clean 비교 |
+| `s7_recon_loss.png` | Noise별 reconstruction MSE 곡선 |
+| `accuracy_delta.png` | Seed별 test accuracy delta와 95% CI |
+| `recall_delta.png` | 숫자 class별 recall delta |
+| `accuracy_table.png` | 30-seed 최종 정확도와 paired t-test |
+| `noise_example.png` | 숫자 5의 clean·세 noise 비교 |
 
 ## References
 
-- Basu et al. (2015), [Learning Sparse Feature Representations using Probabilistic
-  Quadtrees and Deep Belief Nets](https://repository.lsu.edu/enviro_sciences_pubs/422/),
-  ESANN 2015.
-- PyTorch, [Neural Networks: LeNet](https://docs.pytorch.org/tutorials/beginner/blitz/neural_networks_tutorial.html).
+- Basu, S., Karki, M., Ganguly, S., DiBiano, R., Mukhopadhyay, S., & Nemani,
+  R. (2015). [Learning Sparse Feature Representations using Probabilistic
+  Quadtrees and Deep Belief Nets](https://www.esann.org/sites/default/files/proceedings/legacy/es2015-40.pdf).
+  *Proceedings of the 23rd European Symposium on Artificial Neural Networks*,
+  367–372. [n-MNIST dataset page](https://www.csc.lsu.edu/~saikat/n-mnist/).
+- PyTorch. [Neural Networks](https://docs.pytorch.org/tutorials/beginner/blitz/neural_networks_tutorial.html),
+  *Deep Learning with PyTorch: A 60 Minute Blitz*.

@@ -2,7 +2,7 @@
 n-MNIST denoising auxiliary 실험의 단일 실행 진입점이다.
 
 입력:
-    - data, train-baseline, train-multitask, train-edge, plot command
+    - data, train-baseline, train-multitask, plot command
     - 학습 command의 선택적 device 지정
 
 출력:
@@ -21,11 +21,7 @@ import argparse
 import torch
 
 from src.dataset import prepare_data
-from src.experiment import (
-    run_baseline_experiments,
-    run_edge_experiments,
-    run_multitask_experiments,
-)
+from src.experiment import run_baseline_experiments, run_multitask_experiments
 from src.plot import create_plots
 
 
@@ -49,7 +45,6 @@ def parse_arguments() -> argparse.Namespace:
     training_commands = {
         "train-baseline": "세 noise의 classification-only 모델을 학습합니다.",
         "train-multitask": "Noise별 weight pilot 후 multitask 모델을 학습합니다.",
-        "train-edge": "Noise별 joint pilot 후 MSE+Edge 모델을 학습합니다.",
     }
     for command, help_text in training_commands.items():
         training_parser = subparsers.add_parser(command, help=help_text)
@@ -78,10 +73,8 @@ def main() -> None:
     print(f"학습 device: {device}")
     if arguments.command == "train-baseline":
         run_baseline_experiments(device)
-    elif arguments.command == "train-multitask":
-        run_multitask_experiments(device)
     else:
-        run_edge_experiments(device)
+        run_multitask_experiments(device)
 
 
 if __name__ == "__main__":

@@ -176,7 +176,9 @@ def load_mnist_arrays(noise_type: str) -> MnistArrays:
     if noise_type not in NOISE_FILES:
         raise ValueError(f"지원하지 않는 noise type입니다: {noise_type}")
     noisy_path = RAW_DATA_DIRECTORY / NOISE_FILES[noise_type][1]
-    missing_paths = [path for path in (noisy_path, CLEAN_DATA_PATH) if not path.exists()]
+    missing_paths = [
+        path for path in (noisy_path, CLEAN_DATA_PATH) if not path.exists()
+    ]
     if missing_paths:
         missing_text = ", ".join(str(path) for path in missing_paths)
         raise FileNotFoundError(
