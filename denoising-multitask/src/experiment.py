@@ -2,16 +2,17 @@
 Baseline과 multitask의 pilot, 학습, checkpoint, 평가와 CSV 저장을 담당한다.
 
 입력:
-    - main.py에서 선택한 baseline 또는 multitask 실행
+    - main.py에서 선택한 baseline, multitask 또는 gradient alignment 실행
     - 검증된 CPU 또는 CUDA device
 
 출력:
-    - Best checkpoint, epoch history, pilot 및 최종 결과 CSV
+    - Best checkpoint, epoch history, pilot·최종 결과 및 gradient CSV
 
 주요 기능:
     1. 고정 실험 설정과 난수 재현
     2. Classification 및 reconstruction 학습·평가
     3. 노이즈별 reconstruction weight pilot과 최종 반복 실험
+    4. 재학습 중 shared-encoder gradient alignment 측정
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+from scipy.stats import pearsonr
+from scipy.stats import t as student_t
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -36,16 +39,25 @@ from src.model import DenoisingAuxiliaryLeNet
 RANDOM_SEEDS = tuple(range(30))
 PILOT_SEED = 0
 RECONSTRUCTION_WEIGHT_CANDIDATES = (0.05, 0.1, 0.2)
+SELECTED_RECONSTRUCTION_WEIGHTS = {
+    "awgn": 0.05,
+    "motion_blur": 0.1,
+    "reduced_contrast_awgn": 0.1,
+}
 MAXIMUM_EPOCHS = 30
 BATCH_SIZE = 128
 LEARNING_RATE = 0.001
 VALIDATION_RATIO = 0.1
+ALIGNMENT_PROBE_BATCHES = 8
 
 OUTPUT_DIRECTORY = PROJECT_DIRECTORY / "outputs"
 CHECKPOINT_DIRECTORY = OUTPUT_DIRECTORY / "checkpoints"
 HISTORY_DIRECTORY = OUTPUT_DIRECTORY / "histories"
 RESULTS_PATH = OUTPUT_DIRECTORY / "results.csv"
 PILOT_RESULTS_PATH = OUTPUT_DIRECTORY / "pilot_results.csv"
+ALIGNMENT_DIRECTORY = OUTPUT_DIRECTORY / "gradient_alignment"
+ALIGNMENT_MEASUREMENTS_PATH = ALIGNMENT_DIRECTORY / "measurements.csv"
+ALIGNMENT_SUMMARY_PATH = ALIGNMENT_DIRECTORY / "summary.csv"
 
 RESULT_COLUMNS = (
     "noise_type",
@@ -63,6 +75,30 @@ PILOT_RESULT_COLUMNS = (
     "best_epoch",
     "best_validation_accuracy",
     "selected",
+)
+ALIGNMENT_MEASUREMENT_COLUMNS = (
+    "noise_type",
+    "random_seed",
+    "epoch",
+    "reconstruction_weight",
+    "mean_cosine_similarity",
+    "mean_weighted_norm_ratio",
+    "positive_probe_fraction",
+)
+ALIGNMENT_SUMMARY_COLUMNS = (
+    "noise_type",
+    "number_of_seeds",
+    "mean_cosine_similarity",
+    "cosine_ci_lower",
+    "cosine_ci_upper",
+    "early_cosine_similarity",
+    "middle_cosine_similarity",
+    "late_cosine_similarity",
+    "positive_probe_fraction",
+    "mean_weighted_norm_ratio",
+    "mean_accuracy_delta_percentage_points",
+    "accuracy_delta_correlation",
+    "accuracy_delta_correlation_p_value",
 )
 
 
@@ -128,6 +164,32 @@ def run_multitask_experiments(device: torch.device) -> None:
                 reconstruction_weight=selected_weights[noise_type],
             )
             _run_final_experiment(configuration, device)
+
+
+def run_gradient_alignment_experiments(device: torch.device) -> None:
+    """Baseline과 multitask를 학습하고 multitask gradient를 기록한다."""
+    _create_output_directories()
+    for noise_type in NOISE_TYPES:
+        for random_seed in RANDOM_SEEDS:
+            configuration = ExperimentConfiguration(
+                noise_type=noise_type,
+                condition="classification_only",
+                random_seed=random_seed,
+                reconstruction_weight=0.0,
+            )
+            _run_final_experiment(configuration, device)
+
+    for noise_type in NOISE_TYPES:
+        for random_seed in RANDOM_SEEDS:
+            configuration = ExperimentConfiguration(
+                noise_type=noise_type,
+                condition="multitask",
+                random_seed=random_seed,
+                reconstruction_weight=SELECTED_RECONSTRUCTION_WEIGHTS[noise_type],
+            )
+            _run_final_experiment(configuration, device, measure_alignment=True)
+
+    _save_gradient_alignment_summary()
 
 
 def _run_epoch(
@@ -213,8 +275,96 @@ def _run_epoch(
     )
 
 
+def _measure_gradient_alignment(
+    model: DenoisingAuxiliaryLeNet,
+    data_loader: DataLoader,
+    device: torch.device,
+    configuration: ExperimentConfiguration,
+    epoch: int,
+) -> dict[str, Any]:
+    """고정 validation probe에서 두 loss의 shared-encoder gradient를 비교한다."""
+    if model.decoder is None:
+        raise ValueError("Gradient alignment는 decoder가 있는 모델에서만 계산합니다.")
+    model.eval()
+    encoder_parameters = tuple(model.encoder.parameters())
+    classification_loss_function = nn.CrossEntropyLoss()
+    reconstruction_loss_function = nn.MSELoss()
+    cosine_values = []
+    norm_ratios = []
+    with torch.enable_grad():
+        for probe_batch, batch in enumerate(data_loader):
+            if probe_batch >= ALIGNMENT_PROBE_BATCHES:
+                break
+            noisy_images = batch["noisy_image"].to(device, non_blocking=True)
+            clean_targets = batch["clean_target"].to(device, non_blocking=True)
+            labels = batch["label"].to(device, non_blocking=True)
+            output = model(noisy_images, include_reconstruction=True)
+            reconstruction = output["reconstruction"]
+            if reconstruction is None:
+                raise RuntimeError(
+                    "Gradient probe에서 reconstruction을 얻지 못했습니다."
+                )
+            classification_loss = classification_loss_function(
+                output["classification_logits"],
+                labels,
+            )
+            reconstruction_loss = reconstruction_loss_function(
+                reconstruction,
+                clean_targets,
+            )
+            classification_gradients = torch.autograd.grad(
+                classification_loss,
+                encoder_parameters,
+                retain_graph=True,
+            )
+            reconstruction_gradients = torch.autograd.grad(
+                reconstruction_loss,
+                encoder_parameters,
+            )
+            classification_gradient = torch.cat(
+                [gradient.flatten() for gradient in classification_gradients]
+            )
+            reconstruction_gradient = torch.cat(
+                [gradient.flatten() for gradient in reconstruction_gradients]
+            )
+            classification_norm = classification_gradient.norm()
+            reconstruction_norm = reconstruction_gradient.norm()
+            if classification_norm.item() == 0.0 or reconstruction_norm.item() == 0.0:
+                raise FloatingPointError("0인 shared-encoder gradient norm입니다.")
+            cosine_values.append(
+                float(
+                    torch.dot(classification_gradient, reconstruction_gradient).div(
+                        classification_norm * reconstruction_norm
+                    )
+                )
+            )
+            norm_ratios.append(
+                float(
+                    configuration.reconstruction_weight
+                    * reconstruction_norm
+                    / classification_norm
+                )
+            )
+    if len(cosine_values) != ALIGNMENT_PROBE_BATCHES:
+        raise RuntimeError(
+            f"Gradient probe batch가 부족합니다: "
+            f"{len(cosine_values)}/{ALIGNMENT_PROBE_BATCHES}"
+        )
+    return {
+        "noise_type": configuration.noise_type,
+        "random_seed": configuration.random_seed,
+        "epoch": epoch,
+        "reconstruction_weight": configuration.reconstruction_weight,
+        "mean_cosine_similarity": float(np.mean(cosine_values)),
+        "mean_weighted_norm_ratio": float(np.mean(norm_ratios)),
+        "positive_probe_fraction": float(np.mean(np.asarray(cosine_values) > 0.0)),
+    }
+
+
 def _run_final_experiment(
-    configuration: ExperimentConfiguration, device: torch.device
+    configuration: ExperimentConfiguration,
+    device: torch.device,
+    measure_alignment: bool = False,
 ) -> None:
     """한 noise·condition·seed를 학습하거나 완료 checkpoint를 재사용해 평가한다."""
     checkpoint_path = CHECKPOINT_DIRECTORY / _artifact_name(configuration, ".pt")
@@ -231,7 +381,11 @@ def _run_final_experiment(
         use_decoder=configuration.condition == "multitask"
     ).to(device)
 
-    if _checkpoint_matches(checkpoint_path, history_path, configuration):
+    can_reuse = _checkpoint_matches(checkpoint_path, history_path, configuration)
+    if measure_alignment:
+        can_reuse = can_reuse and _alignment_run_is_complete(configuration)
+
+    if can_reuse:
         checkpoint = _load_checkpoint(
             model, checkpoint_path, device, configuration, require_complete=True
         )
@@ -241,6 +395,7 @@ def _run_final_experiment(
         )
         print(f"완료 checkpoint를 재사용합니다: {checkpoint_path}")
     else:
+        alignment_rows = [] if measure_alignment else None
         training_result = _train_model(
             model,
             training_loader,
@@ -249,7 +404,10 @@ def _run_final_experiment(
             checkpoint_path,
             history_path,
             device,
+            alignment_rows=alignment_rows,
         )
+        if alignment_rows is not None:
+            _save_alignment_measurements(configuration, alignment_rows)
 
     test_metrics = _run_epoch(
         model,
@@ -273,10 +431,16 @@ def _train_model(
     checkpoint_path: Path,
     history_path: Path,
     device: torch.device,
+    alignment_rows: list[dict[str, Any]] | None = None,
 ) -> TrainingResult:
     """고정 epoch를 학습하고 validation accuracy 기준 best checkpoint를 복원한다."""
     optimizer = torch.optim.Adam(model.parameters(), lr=configuration.learning_rate)
-    phase = "pilot" if checkpoint_path.stem.startswith("pilot_") else "final"
+    if alignment_rows is not None:
+        phase = "alignment"
+    elif checkpoint_path.stem.startswith("pilot_"):
+        phase = "pilot"
+    else:
+        phase = "final"
     best_validation_accuracy = -1.0
     best_epoch = 0
     history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -324,6 +488,16 @@ def _train_model(
                 ]
             )
             history_file.flush()
+            if alignment_rows is not None:
+                alignment_rows.append(
+                    _measure_gradient_alignment(
+                        model,
+                        validation_loader,
+                        device,
+                        configuration,
+                        epoch,
+                    )
+                )
             print(
                 f"phase={phase} noise={configuration.noise_type} "
                 f"condition={configuration.condition} "
@@ -551,6 +725,165 @@ def _read_pilot_selection(noise_type: str) -> float | None:
     if len(selected) != 1:
         return None
     return float(selected.iloc[0]["reconstruction_weight"])
+
+
+def _read_optional_dataframe(path: Path, columns: tuple[str, ...]) -> pd.DataFrame:
+    """선택적 CSV를 읽고, 없으면 같은 schema의 빈 DataFrame을 반환한다."""
+    if not path.exists():
+        return pd.DataFrame(columns=columns)
+    dataframe = pd.read_csv(path)
+    if tuple(dataframe.columns) != columns:
+        raise ValueError(f"CSV schema가 올바르지 않습니다: {path}")
+    return dataframe
+
+
+def _alignment_run_is_complete(configuration: ExperimentConfiguration) -> bool:
+    """현재 설정의 모든 epoch·probe batch가 저장됐는지 확인한다."""
+    measurements = _read_optional_dataframe(
+        ALIGNMENT_MEASUREMENTS_PATH,
+        ALIGNMENT_MEASUREMENT_COLUMNS,
+    )
+    measurement_rows = measurements.loc[
+        (measurements["noise_type"] == configuration.noise_type)
+        & (measurements["random_seed"] == configuration.random_seed)
+    ]
+    expected_rows = configuration.maximum_epochs
+    if len(measurement_rows) != expected_rows:
+        return False
+    return set(measurement_rows["epoch"].astype(int)) == set(
+        range(1, configuration.maximum_epochs + 1)
+    ) and np.allclose(
+        measurement_rows["reconstruction_weight"],
+        configuration.reconstruction_weight,
+    )
+
+
+def _save_alignment_measurements(
+    configuration: ExperimentConfiguration,
+    alignment_rows: list[dict[str, Any]],
+) -> None:
+    """완료된 한 run의 gradient 측정값을 복합 key 기준으로 교체한다."""
+    replacement = pd.DataFrame(
+        alignment_rows,
+        columns=ALIGNMENT_MEASUREMENT_COLUMNS,
+    )
+    expected_rows = configuration.maximum_epochs
+    if len(replacement) != expected_rows:
+        raise RuntimeError(
+            f"Gradient measurement가 불완전합니다: {len(replacement)}/{expected_rows}"
+        )
+    existing = _read_optional_dataframe(
+        ALIGNMENT_MEASUREMENTS_PATH,
+        ALIGNMENT_MEASUREMENT_COLUMNS,
+    )
+    keep = ~(
+        (existing["noise_type"] == configuration.noise_type)
+        & (existing["random_seed"] == configuration.random_seed)
+    )
+    measurements = pd.concat([existing.loc[keep], replacement], ignore_index=True)
+    measurements = measurements.sort_values(
+        ["noise_type", "random_seed", "epoch"]
+    ).reset_index(drop=True)
+    _write_dataframe_atomically(measurements, ALIGNMENT_MEASUREMENTS_PATH)
+
+
+def _save_gradient_alignment_summary() -> None:
+    """Seed-level gradient 통계와 accuracy delta 상관을 CSV와 stdout에 남긴다."""
+    measurements = _read_optional_dataframe(
+        ALIGNMENT_MEASUREMENTS_PATH,
+        ALIGNMENT_MEASUREMENT_COLUMNS,
+    )
+    results = pd.read_csv(RESULTS_PATH)
+    if tuple(results.columns) != RESULT_COLUMNS:
+        raise ValueError(f"results.csv schema가 올바르지 않습니다: {RESULTS_PATH}")
+
+    accuracies = results.pivot(
+        index=["noise_type", "random_seed"],
+        columns="condition",
+        values="test_accuracy",
+    )
+    required_conditions = {"classification_only", "multitask"}
+    if not required_conditions.issubset(accuracies.columns):
+        raise RuntimeError("Baseline과 multitask test 결과가 모두 필요합니다.")
+
+    summary_rows = []
+    print("\nGradient alignment summary (seed-level means)")
+    print(
+        "noise | cosine mean [95% CI] | early → middle → late | "
+        "weighted MSE/CE norm | positive probes | corr(cosine, Δaccuracy)"
+    )
+    for noise_type in NOISE_TYPES:
+        noise_measurements = measurements.loc[measurements["noise_type"] == noise_type]
+        expected_rows = len(RANDOM_SEEDS) * MAXIMUM_EPOCHS
+        if len(noise_measurements) != expected_rows:
+            raise RuntimeError(
+                f"Gradient measurement가 불완전합니다: "
+                f"noise={noise_type} {len(noise_measurements)}/{expected_rows}"
+            )
+        seed_cosine = noise_measurements.groupby("random_seed")[
+            "mean_cosine_similarity"
+        ].mean()
+        cosine = seed_cosine.to_numpy(dtype=np.float64)
+        standard_error = cosine.std(ddof=1) / np.sqrt(len(cosine))
+        half_width = float(student_t.ppf(0.975, df=len(cosine) - 1) * standard_error)
+        noise_accuracies = accuracies.loc[noise_type]
+        delta = (
+            noise_accuracies["multitask"] - noise_accuracies["classification_only"]
+        ).reindex(seed_cosine.index)
+        if cosine.std(ddof=1) > 0.0 and delta.std(ddof=1) > 0.0:
+            correlation = pearsonr(cosine, delta)
+            correlation_value = float(correlation.statistic)
+            correlation_p_value = float(correlation.pvalue)
+            correlation_text = (
+                f"r={correlation_value:+.3f}, p={correlation_p_value:.4f}"
+            )
+        else:
+            correlation_value = np.nan
+            correlation_p_value = np.nan
+            correlation_text = "undefined"
+
+        def stage_mean(first_epoch: int, last_epoch: int) -> float:
+            return float(
+                noise_measurements.loc[
+                    noise_measurements["epoch"].between(first_epoch, last_epoch),
+                    "mean_cosine_similarity",
+                ].mean()
+            )
+
+        mean_cosine = float(cosine.mean())
+        early_cosine = stage_mean(1, 10)
+        middle_cosine = stage_mean(11, 20)
+        late_cosine = stage_mean(21, 30)
+        positive_fraction = float(noise_measurements["positive_probe_fraction"].mean())
+        mean_norm_ratio = float(noise_measurements["mean_weighted_norm_ratio"].mean())
+        summary_rows.append(
+            {
+                "noise_type": noise_type,
+                "number_of_seeds": len(cosine),
+                "mean_cosine_similarity": mean_cosine,
+                "cosine_ci_lower": mean_cosine - half_width,
+                "cosine_ci_upper": mean_cosine + half_width,
+                "early_cosine_similarity": early_cosine,
+                "middle_cosine_similarity": middle_cosine,
+                "late_cosine_similarity": late_cosine,
+                "positive_probe_fraction": positive_fraction,
+                "mean_weighted_norm_ratio": mean_norm_ratio,
+                "mean_accuracy_delta_percentage_points": float(delta.mean() * 100.0),
+                "accuracy_delta_correlation": correlation_value,
+                "accuracy_delta_correlation_p_value": correlation_p_value,
+            }
+        )
+        print(
+            f"{noise_type} | {mean_cosine:+.4f} "
+            f"[{mean_cosine - half_width:+.4f}, "
+            f"{mean_cosine + half_width:+.4f}] | "
+            f"{early_cosine:+.4f} → {middle_cosine:+.4f} → "
+            f"{late_cosine:+.4f} | {mean_norm_ratio:.6f} | "
+            f"{positive_fraction * 100.0:.1f}% | "
+            f"{correlation_text}"
+        )
+    summary = pd.DataFrame(summary_rows, columns=ALIGNMENT_SUMMARY_COLUMNS)
+    _write_dataframe_atomically(summary, ALIGNMENT_SUMMARY_PATH)
 
 
 def _write_pilot_results(noise_type: str, pilot_rows: list[dict[str, Any]]) -> None:
