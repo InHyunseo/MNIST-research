@@ -9,13 +9,18 @@ head를 사용하고 decoder 유무만 바꾼다.
 - Noise: AWGN, motion blur, reduced contrast + AWGN
 - Baseline: `encoder → classification head`
 - Multitask: `encoder → classification head + denoising decoder`
-- Loss: baseline은 cross-entropy, multitask는 `cross-entropy + λ × MSE`
-- Seeds: `0–29`
+- Edge multitask: 기존 multitask에 인접 픽셀의 가로·세로 차분 loss 추가
+- Loss: baseline은 cross-entropy, multitask는 `cross-entropy + λ × MSE`,
+  edge multitask는 `cross-entropy + λ × (MSE + β × Edge)`
+- Seeds: baseline과 multitask는 `0–29`, edge multitask는 탐색적으로 `0–9`
 - Optimizer: Adam, learning rate `0.001`
 - Batch size: `128`, maximum epochs: `30`, validation ratio: `0.1`
 
 Multitask는 각 noise의 seed 0에서 `λ ∈ {0.05, 0.1, 0.2}`를 비교해 validation
 classification accuracy가 가장 높은 값을 선택한 뒤 모든 seed를 처음부터 학습한다.
+Edge multitask는 동일한 seed에서 위 λ와 `β ∈ {0, 0.05, 0.1, 0.2}`의 조합을
+비교한다. Edge loss는 복원 image와 clean target의 가로·세로 1차 차분 사이 L1
+loss의 평균이다. 동률이면 β와 λ가 작은 조합을 선택한다.
 
 n-MNIST의 noise 강도는 배포본에 다음과 같이 고정돼 있다.
 
@@ -82,6 +87,7 @@ Baseline과 multitask는 독립적으로 실행한다. `--device`는 `auto`, `cp
 ```bash
 python main.py train-baseline --device cuda
 python main.py train-multitask --device cuda
+python main.py train-edge --device cuda
 python main.py plot
 ```
 
@@ -94,7 +100,7 @@ outputs/
 ├── checkpoints/       final run별 best-validation checkpoint
 ├── histories/         final run별 epoch CSV
 ├── figures/           accuracy 비교, delta와 seed-overlaid history figure
-├── pilot_results.csv  noise별 λ 후보의 validation 결과
+├── pilot_results.csv  noise별 λ·β 후보의 validation 결과
 └── results.csv        final seed별 test classification 결과
 ```
 

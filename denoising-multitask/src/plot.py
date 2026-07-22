@@ -53,6 +53,8 @@ def create_plots() -> None:
             f"최종 결과가 없습니다: {RESULTS_PATH}\n먼저 학습을 완료하세요."
         )
     results = pd.read_csv(RESULTS_PATH)
+    if "edge_weight" not in results.columns:
+        results.insert(4, "edge_weight", 0.0)
     if tuple(results.columns) != RESULT_COLUMNS:
         raise ValueError(f"results.csv schema가 올바르지 않습니다: {RESULTS_PATH}")
     _validate_complete_conditions(results)
@@ -127,7 +129,6 @@ def _plot_accuracy_delta(results: pd.DataFrame) -> None:
             color="#72A5D3",
             alpha=0.72,
             edgecolors="none",
-            label="Seed" if noise_index == 0 else None,
             zorder=3,
         )
         axis.errorbar(
@@ -140,12 +141,13 @@ def _plot_accuracy_delta(results: pd.DataFrame) -> None:
             ecolor="#173F5F",
             elinewidth=1.7,
             capsize=5,
-            label="Mean ± 95% CI" if noise_index == 0 else None,
+            label="95% Confidence Interval" if noise_index == 0 else None,
             zorder=4,
         )
     axis.axhline(0.0, color="black", linewidth=1)
     axis.set_xticks(positions, [NOISE_LABELS[name] for name in NOISE_TYPES])
-    axis.set_ylabel("Δ test accuracy (pp)")
+    axis.set_ylabel("Δ test accuracy")
+    axis.set_ylim(-0.6, 0.6)
     axis.legend()
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()

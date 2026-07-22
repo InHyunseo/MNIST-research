@@ -2,7 +2,7 @@
 Baseline과 multitask의 pilot, 학습, checkpoint, 평가와 CSV 저장을 담당한다.
 
 입력:
-    - main.py에서 선택한 baseline 또는 multitask 실행
+    - main.py에서 선택한 baseline, multitask 또는 edge multitask 실행
     - 검증된 CPU 또는 CUDA device
 
 출력:
@@ -11,7 +11,7 @@ Baseline과 multitask의 pilot, 학습, checkpoint, 평가와 CSV 저장을 담�
 주요 기능:
     1. 고정 실험 설정과 난수 재현
     2. Classification 및 reconstruction 학습·평가
-    3. 노이즈별 reconstruction weight pilot과 최종 반복 실험
+    3. 노이즈별 loss weight pilot과 최종 반복 실험
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch import nn
+import torch.nn.functional as functional
 from torch.utils.data import DataLoader
 
 from src.dataset import NOISE_TYPES, PROJECT_DIRECTORY, create_data_loaders
@@ -34,8 +35,10 @@ from src.model import DenoisingAuxiliaryLeNet
 
 
 RANDOM_SEEDS = tuple(range(30))
+EDGE_RANDOM_SEEDS = tuple(range(10))
 PILOT_SEED = 0
 RECONSTRUCTION_WEIGHT_CANDIDATES = (0.05, 0.1, 0.2)
+EDGE_WEIGHT_CANDIDATES = (0.0, 0.05, 0.1, 0.2)
 MAXIMUM_EPOCHS = 30
 BATCH_SIZE = 128
 LEARNING_RATE = 0.001
@@ -52,12 +55,25 @@ RESULT_COLUMNS = (
     "condition",
     "random_seed",
     "reconstruction_weight",
+    "edge_weight",
     "best_epoch",
     "best_validation_accuracy",
     "test_classification_loss",
     "test_accuracy",
 )
 PILOT_RESULT_COLUMNS = (
+    "condition",
+    "noise_type",
+    "reconstruction_weight",
+    "edge_weight",
+    "best_epoch",
+    "best_validation_accuracy",
+    "selected",
+)
+LEGACY_RESULT_COLUMNS = tuple(
+    column for column in RESULT_COLUMNS if column != "edge_weight"
+)
+LEGACY_PILOT_RESULT_COLUMNS = (
     "noise_type",
     "reconstruction_weight",
     "best_epoch",
@@ -74,6 +90,7 @@ class ExperimentConfiguration:
     condition: str
     random_seed: int
     reconstruction_weight: float
+    edge_weight: float = 0.0
     maximum_epochs: int = MAXIMUM_EPOCHS
     batch_size: int = BATCH_SIZE
     learning_rate: float = LEARNING_RATE
@@ -87,6 +104,7 @@ class EpochMetrics:
     total_loss: float
     classification_loss: float
     reconstruction_loss: float | None
+    edge_loss: float | None
     accuracy: float
 
 
@@ -130,11 +148,32 @@ def run_multitask_experiments(device: torch.device) -> None:
             _run_final_experiment(configuration, device)
 
 
+def run_edge_experiments(device: torch.device) -> None:
+    """Noise별 loss weight pilot 후 10개 seed의 MSE+Edge 실험을 실행한다."""
+    _create_output_directories()
+    selected_weights = {
+        noise_type: _select_edge_weights(noise_type, device)
+        for noise_type in NOISE_TYPES
+    }
+    for noise_type in NOISE_TYPES:
+        reconstruction_weight, edge_weight = selected_weights[noise_type]
+        for random_seed in EDGE_RANDOM_SEEDS:
+            configuration = ExperimentConfiguration(
+                noise_type=noise_type,
+                condition="multitask_edge",
+                random_seed=random_seed,
+                reconstruction_weight=reconstruction_weight,
+                edge_weight=edge_weight,
+            )
+            _run_final_experiment(configuration, device)
+
+
 def _run_epoch(
     model: DenoisingAuxiliaryLeNet,
     data_loader: DataLoader,
     device: torch.device,
     reconstruction_weight: float,
+    edge_weight: float = 0.0,
     optimizer: torch.optim.Optimizer | None = None,
     include_reconstruction: bool = False,
 ) -> EpochMetrics:
@@ -146,6 +185,7 @@ def _run_epoch(
     total_loss_sum = 0.0
     classification_loss_sum = 0.0
     reconstruction_loss_sum = 0.0
+    edge_loss_sum = 0.0
     total_correct = 0
     total_samples = 0
     reconstruction_enabled = (
@@ -168,6 +208,7 @@ def _run_epoch(
                 output["classification_logits"], labels
             )
             reconstruction_loss = None
+            edge_loss = None
             total_loss = classification_loss
             if reconstruction_enabled:
                 reconstruction = output["reconstruction"]
@@ -176,7 +217,13 @@ def _run_epoch(
                 reconstruction_loss = reconstruction_loss_function(
                     reconstruction, clean_targets
                 )
-                total_loss = classification_loss + reconstruction_weight * reconstruction_loss
+                auxiliary_loss = reconstruction_loss
+                if edge_weight > 0.0:
+                    edge_loss = _edge_loss(reconstruction, clean_targets)
+                    auxiliary_loss = auxiliary_loss + edge_weight * edge_loss
+                total_loss = (
+                    classification_loss + reconstruction_weight * auxiliary_loss
+                )
             if not torch.isfinite(total_loss):
                 phase = "training" if is_training else "evaluation"
                 raise FloatingPointError(
@@ -194,6 +241,8 @@ def _run_epoch(
                 reconstruction_loss_sum += (
                     float(reconstruction_loss.item()) * current_batch_size
                 )
+            if edge_loss is not None:
+                edge_loss_sum += float(edge_loss.item()) * current_batch_size
             predictions = output["classification_logits"].argmax(dim=1)
             total_correct += int((predictions == labels).sum().item())
 
@@ -203,8 +252,28 @@ def _run_epoch(
         reconstruction_loss=(
             reconstruction_loss_sum / total_samples if reconstruction_enabled else None
         ),
+        edge_loss=(
+            edge_loss_sum / total_samples
+            if reconstruction_enabled and edge_weight > 0.0
+            else None
+        ),
         accuracy=total_correct / total_samples,
     )
+
+
+def _edge_loss(
+    reconstruction: torch.Tensor, clean_target: torch.Tensor
+) -> torch.Tensor:
+    """가로·세로 인접 픽셀의 1차 차분을 L1으로 비교한다."""
+    horizontal_loss = functional.l1_loss(
+        torch.diff(reconstruction, dim=-1),
+        torch.diff(clean_target, dim=-1),
+    )
+    vertical_loss = functional.l1_loss(
+        torch.diff(reconstruction, dim=-2),
+        torch.diff(clean_target, dim=-2),
+    )
+    return 0.5 * (horizontal_loss + vertical_loss)
 
 
 def _run_final_experiment(
@@ -222,7 +291,7 @@ def _run_final_experiment(
         use_pinned_memory=device.type == "cuda",
     )
     model = DenoisingAuxiliaryLeNet(
-        use_decoder=configuration.condition == "multitask"
+        use_decoder=configuration.condition in {"multitask", "multitask_edge"}
     ).to(device)
 
     if _checkpoint_matches(checkpoint_path, history_path, configuration):
@@ -250,6 +319,7 @@ def _run_final_experiment(
         test_loader,
         device,
         configuration.reconstruction_weight,
+        configuration.edge_weight,
     )
     _upsert_final_result(configuration, training_result, test_metrics)
     print(
@@ -281,10 +351,12 @@ def _train_model(
             "training_total_loss",
             "training_classification_loss",
             "training_reconstruction_loss",
+            "training_edge_loss",
             "training_accuracy",
             "validation_total_loss",
             "validation_classification_loss",
             "validation_reconstruction_loss",
+            "validation_edge_loss",
             "validation_accuracy",
         ])
         for epoch in range(1, configuration.maximum_epochs + 1):
@@ -293,6 +365,7 @@ def _train_model(
                 training_loader,
                 device,
                 configuration.reconstruction_weight,
+                configuration.edge_weight,
                 optimizer=optimizer,
             )
             validation_metrics = _run_epoch(
@@ -300,6 +373,7 @@ def _train_model(
                 validation_loader,
                 device,
                 configuration.reconstruction_weight,
+                configuration.edge_weight,
                 include_reconstruction=True,
             )
             writer.writerow([
@@ -307,10 +381,12 @@ def _train_model(
                 f"{training_metrics.total_loss:.8f}",
                 f"{training_metrics.classification_loss:.8f}",
                 _format_optional_metric(training_metrics.reconstruction_loss),
+                _format_optional_metric(training_metrics.edge_loss),
                 f"{training_metrics.accuracy:.8f}",
                 f"{validation_metrics.total_loss:.8f}",
                 f"{validation_metrics.classification_loss:.8f}",
                 _format_optional_metric(validation_metrics.reconstruction_loss),
+                _format_optional_metric(validation_metrics.edge_loss),
                 f"{validation_metrics.accuracy:.8f}",
             ])
             history_file.flush()
@@ -318,6 +394,7 @@ def _train_model(
                 f"phase={phase} noise={configuration.noise_type} "
                 f"condition={configuration.condition} "
                 f"reconstruction_weight={configuration.reconstruction_weight:g} "
+                f"edge_weight={configuration.edge_weight:g} "
                 f"seed={configuration.random_seed} epoch={epoch} "
                 f"validation_accuracy={validation_metrics.accuracy:.4f}"
             )
@@ -388,8 +465,10 @@ def _select_reconstruction_weight(
                 device,
             )
             pilot_rows.append({
+                "condition": "multitask",
                 "noise_type": noise_type,
                 "reconstruction_weight": reconstruction_weight,
+                "edge_weight": 0.0,
                 "best_epoch": result.best_epoch,
                 "best_validation_accuracy": result.best_validation_accuracy,
             })
@@ -410,6 +489,116 @@ def _select_reconstruction_weight(
     _write_pilot_results(noise_type, pilot_rows)
     print(f"Pilot 선택: noise={noise_type} weight={selected_weight}")
     return selected_weight
+
+
+def _select_edge_weights(
+    noise_type: str, device: torch.device
+) -> tuple[float, float]:
+    """Seed 0 joint pilot으로 noise별 reconstruction·edge weight를 고른다."""
+    existing_selection = _read_edge_pilot_selection(noise_type)
+    if existing_selection is not None:
+        reconstruction_weight, edge_weight = existing_selection
+        print(
+            f"기존 Edge pilot 결과를 사용합니다: noise={noise_type} "
+            f"reconstruction_weight={reconstruction_weight:g} "
+            f"edge_weight={edge_weight:g}"
+        )
+        return existing_selection
+
+    pilot_rows = []
+    for reconstruction_weight in RECONSTRUCTION_WEIGHT_CANDIDATES:
+        for edge_weight in EDGE_WEIGHT_CANDIDATES:
+            reused_row = (
+                _read_existing_mse_pilot_row(noise_type, reconstruction_weight)
+                if edge_weight == 0.0
+                else None
+            )
+            if reused_row is not None:
+                pilot_rows.append({
+                    "condition": "multitask_edge",
+                    "noise_type": noise_type,
+                    "reconstruction_weight": reconstruction_weight,
+                    "edge_weight": edge_weight,
+                    "best_epoch": int(reused_row["best_epoch"]),
+                    "best_validation_accuracy": float(
+                        reused_row["best_validation_accuracy"]
+                    ),
+                })
+                continue
+
+            configuration = ExperimentConfiguration(
+                noise_type=noise_type,
+                condition="multitask_edge",
+                random_seed=PILOT_SEED,
+                reconstruction_weight=reconstruction_weight,
+                edge_weight=edge_weight,
+            )
+            checkpoint_path = CHECKPOINT_DIRECTORY / (
+                f"pilot_edge_{noise_type}_weight_{reconstruction_weight:g}_"
+                f"edge_{edge_weight:g}.pt"
+            )
+            history_path = HISTORY_DIRECTORY / (
+                f"pilot_edge_{noise_type}_weight_{reconstruction_weight:g}_"
+                f"edge_{edge_weight:g}.csv"
+            )
+            _set_random_seed(PILOT_SEED)
+            training_loader, validation_loader, _ = create_data_loaders(
+                noise_type,
+                configuration.batch_size,
+                configuration.validation_ratio,
+                PILOT_SEED,
+                use_pinned_memory=device.type == "cuda",
+            )
+            model = DenoisingAuxiliaryLeNet(use_decoder=True).to(device)
+            try:
+                result = _train_model(
+                    model,
+                    training_loader,
+                    validation_loader,
+                    configuration,
+                    checkpoint_path,
+                    history_path,
+                    device,
+                )
+                pilot_rows.append({
+                    "condition": "multitask_edge",
+                    "noise_type": noise_type,
+                    "reconstruction_weight": reconstruction_weight,
+                    "edge_weight": edge_weight,
+                    "best_epoch": result.best_epoch,
+                    "best_validation_accuracy": result.best_validation_accuracy,
+                })
+            finally:
+                checkpoint_path.unlink(missing_ok=True)
+                checkpoint_path.with_suffix(
+                    checkpoint_path.suffix + ".tmp"
+                ).unlink(missing_ok=True)
+                history_path.unlink(missing_ok=True)
+
+    selected_row = max(
+        pilot_rows,
+        key=lambda row: (
+            float(row["best_validation_accuracy"]),
+            -float(row["edge_weight"]),
+            -float(row["reconstruction_weight"]),
+        ),
+    )
+    selected_weights = (
+        float(selected_row["reconstruction_weight"]),
+        float(selected_row["edge_weight"]),
+    )
+    for row in pilot_rows:
+        row["selected"] = (
+            float(row["reconstruction_weight"]),
+            float(row["edge_weight"]),
+        ) == selected_weights
+    _write_pilot_results(noise_type, pilot_rows)
+    print(
+        f"Edge pilot 선택: noise={noise_type} "
+        f"reconstruction_weight={selected_weights[0]:g} "
+        f"edge_weight={selected_weights[1]:g}"
+    )
+    return selected_weights
 
 
 def _set_random_seed(random_seed: int) -> None:
@@ -458,7 +647,7 @@ def _load_checkpoint(
         )
     except Exception as error:
         raise RuntimeError(f"Checkpoint를 불러오지 못했습니다: {checkpoint_path}") from error
-    if checkpoint.get("configuration") != asdict(configuration):
+    if not _checkpoint_configuration_matches(checkpoint, configuration):
         raise ValueError(f"현재 설정과 다른 checkpoint입니다: {checkpoint_path}")
     if require_complete and checkpoint.get("training_complete") is not True:
         raise ValueError(f"정상 완료되지 않은 checkpoint입니다: {checkpoint_path}")
@@ -482,9 +671,21 @@ def _checkpoint_matches(
     except Exception:
         return False
     return (
-        checkpoint.get("configuration") == asdict(configuration)
+        _checkpoint_configuration_matches(checkpoint, configuration)
         and checkpoint.get("training_complete") is True
     )
+
+
+def _checkpoint_configuration_matches(
+    checkpoint: dict[str, Any], configuration: ExperimentConfiguration
+) -> bool:
+    """Edge 도입 전 checkpoint의 weight 0 설정까지 호환해 비교한다."""
+    stored_configuration = checkpoint.get("configuration")
+    if not isinstance(stored_configuration, dict):
+        return False
+    stored_configuration = dict(stored_configuration)
+    stored_configuration.setdefault("edge_weight", 0.0)
+    return stored_configuration == asdict(configuration)
 
 
 def _upsert_final_result(
@@ -498,15 +699,14 @@ def _upsert_final_result(
         "condition": configuration.condition,
         "random_seed": configuration.random_seed,
         "reconstruction_weight": configuration.reconstruction_weight,
+        "edge_weight": configuration.edge_weight,
         "best_epoch": training_result.best_epoch,
         "best_validation_accuracy": training_result.best_validation_accuracy,
         "test_classification_loss": test_metrics.classification_loss,
         "test_accuracy": test_metrics.accuracy,
     }
     if RESULTS_PATH.exists():
-        results = pd.read_csv(RESULTS_PATH)
-        if tuple(results.columns) != RESULT_COLUMNS:
-            raise ValueError(f"results.csv schema가 올바르지 않습니다: {RESULTS_PATH}")
+        results = _read_results()
         matching = (
             (results["noise_type"] == configuration.noise_type)
             & (results["condition"] == configuration.condition)
@@ -526,12 +726,12 @@ def _read_pilot_selection(noise_type: str) -> float | None:
     """완전한 기존 pilot 결과가 있으면 선택된 reconstruction weight를 반환한다."""
     if not PILOT_RESULTS_PATH.exists():
         return None
-    results = pd.read_csv(PILOT_RESULTS_PATH)
-    if tuple(results.columns) != PILOT_RESULT_COLUMNS:
-        raise ValueError(
-            f"pilot_results.csv schema가 올바르지 않습니다: {PILOT_RESULTS_PATH}"
-        )
-    noise_results = results.loc[results["noise_type"] == noise_type]
+    results = _read_pilot_results()
+    noise_results = results.loc[
+        (results["noise_type"] == noise_type)
+        & (results["condition"] == "multitask")
+        & (results["edge_weight"] == 0.0)
+    ]
     if set(noise_results["reconstruction_weight"].astype(float)) != set(
         RECONSTRUCTION_WEIGHT_CANDIDATES
     ):
@@ -542,24 +742,103 @@ def _read_pilot_selection(noise_type: str) -> float | None:
     return float(selected.iloc[0]["reconstruction_weight"])
 
 
+def _read_edge_pilot_selection(
+    noise_type: str,
+) -> tuple[float, float] | None:
+    """완전한 기존 joint pilot 결과가 있으면 선택된 두 weight를 반환한다."""
+    if not PILOT_RESULTS_PATH.exists():
+        return None
+    results = _read_pilot_results()
+    noise_results = results.loc[
+        (results["noise_type"] == noise_type)
+        & (results["condition"] == "multitask_edge")
+    ]
+    expected_pairs = {
+        (reconstruction_weight, edge_weight)
+        for reconstruction_weight in RECONSTRUCTION_WEIGHT_CANDIDATES
+        for edge_weight in EDGE_WEIGHT_CANDIDATES
+    }
+    available_pairs = {
+        (float(row.reconstruction_weight), float(row.edge_weight))
+        for row in noise_results.itertuples(index=False)
+    }
+    if (
+        available_pairs != expected_pairs
+        or len(noise_results) != len(expected_pairs)
+    ):
+        return None
+    selected = noise_results.loc[noise_results["selected"].astype(bool)]
+    if len(selected) != 1:
+        return None
+    return (
+        float(selected.iloc[0]["reconstruction_weight"]),
+        float(selected.iloc[0]["edge_weight"]),
+    )
+
+
+def _read_existing_mse_pilot_row(
+    noise_type: str, reconstruction_weight: float
+) -> dict[str, Any] | None:
+    """Edge weight 0과 동일한 기존 MSE pilot 결과 한 행을 반환한다."""
+    if not PILOT_RESULTS_PATH.exists():
+        return None
+    results = _read_pilot_results()
+    matching = results.loc[
+        (results["noise_type"] == noise_type)
+        & (results["condition"] == "multitask")
+        & (results["reconstruction_weight"] == reconstruction_weight)
+        & (results["edge_weight"] == 0.0)
+    ]
+    if len(matching) != 1:
+        return None
+    return matching.iloc[0].to_dict()
+
+
 def _write_pilot_results(
     noise_type: str, pilot_rows: list[dict[str, Any]]
 ) -> None:
     """한 noise의 후보별 validation 결과와 선택 여부를 pilot_results.csv에 기록한다."""
+    if not pilot_rows:
+        raise ValueError("저장할 pilot 결과가 없습니다.")
+    condition = str(pilot_rows[0]["condition"])
     if PILOT_RESULTS_PATH.exists():
-        results = pd.read_csv(PILOT_RESULTS_PATH)
-        if tuple(results.columns) != PILOT_RESULT_COLUMNS:
-            raise ValueError(
-                f"pilot_results.csv schema가 올바르지 않습니다: {PILOT_RESULTS_PATH}"
+        results = _read_pilot_results()
+        results = results.loc[
+            ~(
+                (results["noise_type"] == noise_type)
+                & (results["condition"] == condition)
             )
-        results = results.loc[results["noise_type"] != noise_type]
+        ]
         results = pd.concat([results, pd.DataFrame(pilot_rows)], ignore_index=True)
     else:
         results = pd.DataFrame(pilot_rows, columns=PILOT_RESULT_COLUMNS)
     results = results.sort_values(
-        ["noise_type", "reconstruction_weight"]
+        ["condition", "noise_type", "reconstruction_weight", "edge_weight"]
     ).reset_index(drop=True)
     _write_dataframe_atomically(results, PILOT_RESULTS_PATH)
+
+
+def _read_results() -> pd.DataFrame:
+    """현재 또는 Edge 도입 전 schema의 final result를 읽는다."""
+    results = pd.read_csv(RESULTS_PATH)
+    if tuple(results.columns) == LEGACY_RESULT_COLUMNS:
+        results.insert(4, "edge_weight", 0.0)
+    if tuple(results.columns) != RESULT_COLUMNS:
+        raise ValueError(f"results.csv schema가 올바르지 않습니다: {RESULTS_PATH}")
+    return results
+
+
+def _read_pilot_results() -> pd.DataFrame:
+    """현재 또는 Edge 도입 전 schema의 pilot result를 읽는다."""
+    results = pd.read_csv(PILOT_RESULTS_PATH)
+    if tuple(results.columns) == LEGACY_PILOT_RESULT_COLUMNS:
+        results.insert(0, "condition", "multitask")
+        results.insert(3, "edge_weight", 0.0)
+    if tuple(results.columns) != PILOT_RESULT_COLUMNS:
+        raise ValueError(
+            f"pilot_results.csv schema가 올바르지 않습니다: {PILOT_RESULTS_PATH}"
+        )
+    return results
 
 
 def _write_dataframe_atomically(dataframe: pd.DataFrame, path: Path) -> None:
