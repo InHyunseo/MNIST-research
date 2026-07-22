@@ -22,6 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t
 
 from src.dataset import NOISE_TYPES, PROJECT_DIRECTORY
 from src.experiment import (
@@ -124,9 +125,10 @@ def _plot_accuracy_comparison(results: pd.DataFrame) -> None:
 
 
 def _plot_accuracy_delta(results: pd.DataFrame) -> None:
-    """같은 seed의 multitask−baseline test accuracy 차이를 percentage point로 그린다."""
+    """같은 seed의 test accuracy 차이와 평균±95% 신뢰구간을 그린다."""
+    paired_deltas = []
     mean_deltas = []
-    standard_deviations = []
+    confidence_interval_half_widths = []
     for noise_type in NOISE_TYPES:
         noise_results = results.loc[results["noise_type"] == noise_type]
         baseline = noise_results.loc[
@@ -140,27 +142,51 @@ def _plot_accuracy_delta(results: pd.DataFrame) -> None:
         paired = baseline.merge(multitask, on="random_seed", validate="one_to_one")
         if paired.empty:
             raise RuntimeError(f"Paired seed 결과가 없습니다: {noise_type}")
+        paired = paired.sort_values("random_seed")
         deltas = (
-            paired["multitask_accuracy"] - paired["baseline_accuracy"]
-        ) * 100.0
+            (paired["multitask_accuracy"] - paired["baseline_accuracy"]) * 100.0
+        ).to_numpy(dtype=np.float64)
+        paired_deltas.append(deltas)
         mean_deltas.append(float(deltas.mean()))
-        standard_deviations.append(
-            float(deltas.std(ddof=1)) if len(deltas) > 1 else 0.0
-        )
+        if len(deltas) > 1:
+            standard_error = float(deltas.std(ddof=1) / np.sqrt(len(deltas)))
+            critical_value = float(student_t.ppf(0.975, df=len(deltas) - 1))
+            confidence_interval_half_widths.append(critical_value * standard_error)
+        else:
+            confidence_interval_half_widths.append(0.0)
 
     figure, axis = plt.subplots(figsize=(8, 5))
     positions = np.arange(len(NOISE_TYPES))
-    axis.bar(
-        positions,
-        mean_deltas,
-        yerr=standard_deviations,
-        capsize=4,
-        color="#4C78A8",
-    )
+    for noise_index, (position, deltas) in enumerate(zip(positions, paired_deltas)):
+        jitter = np.linspace(-0.12, 0.12, len(deltas)) if len(deltas) > 1 else 0.0
+        axis.scatter(
+            position + jitter,
+            deltas,
+            s=34,
+            color="#72A5D3",
+            alpha=0.72,
+            edgecolors="none",
+            label="Individual seed" if noise_index == 0 else None,
+            zorder=3,
+        )
+        axis.errorbar(
+            position,
+            mean_deltas[noise_index],
+            yerr=confidence_interval_half_widths[noise_index],
+            fmt="o",
+            markersize=7,
+            color="#173F5F",
+            ecolor="#173F5F",
+            elinewidth=1.7,
+            capsize=5,
+            label="Mean ± 95% CI" if noise_index == 0 else None,
+            zorder=4,
+        )
     axis.axhline(0.0, color="black", linewidth=1)
     axis.set_xticks(positions, [NOISE_LABELS[name] for name in NOISE_TYPES])
     axis.set_ylabel("Accuracy delta (percentage points)")
     axis.set_title("Multitask − classification-only accuracy")
+    axis.legend()
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
     figure.savefig(FIGURE_DIRECTORY / "accuracy_delta.png", dpi=160)
