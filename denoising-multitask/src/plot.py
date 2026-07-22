@@ -6,7 +6,7 @@
     - outputs/histories의 최종 run별 CSV
 
 출력:
-    - Accuracy comparison, paired delta, seed-overlaid loss·accuracy PNG
+    - Paired accuracy delta, run별 train·validation history PNG
 
 주요 기능:
     1. Seed별 결과 집계
@@ -41,7 +41,7 @@ NOISE_LABELS = {
     "reduced_contrast_awgn": "Reduced contrast + AWGN",
 }
 CONDITION_LABELS = {
-    "classification_only": "Classification only",
+    "classification_only": "Baseline",
     "multitask": "Multitask",
 }
 
@@ -57,7 +57,6 @@ def create_plots() -> None:
         raise ValueError(f"results.csv schema가 올바르지 않습니다: {RESULTS_PATH}")
     _validate_complete_conditions(results)
     FIGURE_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    _plot_accuracy_comparison(results)
     _plot_accuracy_delta(results)
     _plot_training_histories()
     print(f"Figure를 생성했습니다: {FIGURE_DIRECTORY}")
@@ -84,44 +83,6 @@ def _validate_complete_conditions(results: pd.DataFrame) -> None:
                     f"condition={condition}, missing={missing_seeds}, "
                     f"unexpected={unexpected_seeds}"
                 )
-
-
-def _plot_accuracy_comparison(results: pd.DataFrame) -> None:
-    """Noise별 두 조건의 평균 test accuracy와 표준편차를 grouped bar로 그린다."""
-    x_positions = np.arange(len(NOISE_TYPES), dtype=np.float64)
-    bar_width = 0.36
-    figure, axis = plt.subplots(figsize=(9, 5))
-    for condition_index, condition in enumerate(CONDITIONS):
-        means = []
-        standard_deviations = []
-        for noise_type in NOISE_TYPES:
-            values = results.loc[
-                (results["noise_type"] == noise_type)
-                & (results["condition"] == condition),
-                "test_accuracy",
-            ].astype(float)
-            means.append(float(values.mean()))
-            standard_deviations.append(
-                float(values.std(ddof=1)) if len(values) > 1 else 0.0
-            )
-        offset = (condition_index - 0.5) * bar_width
-        axis.bar(
-            x_positions + offset,
-            means,
-            bar_width,
-            yerr=standard_deviations,
-            capsize=4,
-            label=CONDITION_LABELS[condition],
-        )
-    axis.set_xticks(x_positions, [NOISE_LABELS[name] for name in NOISE_TYPES])
-    axis.set_ylabel("Test classification accuracy")
-    axis.set_ylim(0.0, 1.0)
-    axis.set_title("Classification accuracy by noise type")
-    axis.legend()
-    axis.grid(axis="y", alpha=0.25)
-    figure.tight_layout()
-    figure.savefig(FIGURE_DIRECTORY / "accuracy_comparison.png", dpi=160)
-    plt.close(figure)
 
 
 def _plot_accuracy_delta(results: pd.DataFrame) -> None:
@@ -166,7 +127,7 @@ def _plot_accuracy_delta(results: pd.DataFrame) -> None:
             color="#72A5D3",
             alpha=0.72,
             edgecolors="none",
-            label="Individual seed" if noise_index == 0 else None,
+            label="Seed" if noise_index == 0 else None,
             zorder=3,
         )
         axis.errorbar(
@@ -184,8 +145,7 @@ def _plot_accuracy_delta(results: pd.DataFrame) -> None:
         )
     axis.axhline(0.0, color="black", linewidth=1)
     axis.set_xticks(positions, [NOISE_LABELS[name] for name in NOISE_TYPES])
-    axis.set_ylabel("Accuracy delta (percentage points)")
-    axis.set_title("Multitask − classification-only accuracy")
+    axis.set_ylabel("Δ test accuracy (pp)")
     axis.legend()
     axis.grid(axis="y", alpha=0.25)
     figure.tight_layout()
@@ -194,12 +154,13 @@ def _plot_accuracy_delta(results: pd.DataFrame) -> None:
 
 
 def _plot_training_histories() -> None:
-    """Noise와 condition별 loss·accuracy를 공통 축 범위로 저장한다."""
+    """Noise와 condition별 train·validation history를 공통 축으로 저장한다."""
     legacy_patterns = (
         "*_seed_*_loss.png",
         "*_seed_*_accuracy.png",
         "*_loss_spaghetti.png",
         "*_accuracy_spaghetti.png",
+        "*_validation_history.png",
     )
     for legacy_pattern in legacy_patterns:
         for legacy_path in FIGURE_DIRECTORY.glob(legacy_pattern):
@@ -267,7 +228,7 @@ def _plot_spaghetti_history(
     loss_upper_limit: float,
     accuracy_lower_limit: float,
 ) -> None:
-    """Loss와 accuracy를 한 행에 나란히 놓고 seed 곡선을 겹쳐 그린다."""
+    """Loss와 accuracy에 train·validation seed 곡선과 평균을 그린다."""
     required_columns = {
         "epoch",
         "random_seed",
@@ -337,13 +298,21 @@ def _plot_spaghetti_history(
             label="Validation",
         )
         axis.set_title(title)
-        axis.set_xlabel("Epoch")
+        axis.set_xlim(1, 30)
+        axis.set_xticks((1, 5, 10, 15, 20, 25, 30))
         axis.set_ylim(*limits)
         axis.grid(alpha=0.25)
 
     axes[1].legend()
-    figure.suptitle(f"{NOISE_LABELS[noise_type]} — {CONDITION_LABELS[condition]}")
-    figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
+    figure.supxlabel("Epoch")
+    figure.suptitle(f"{NOISE_LABELS[noise_type]} · {CONDITION_LABELS[condition]}")
+    figure.subplots_adjust(
+        left=0.07,
+        right=0.985,
+        bottom=0.16,
+        top=0.80,
+        wspace=0.12,
+    )
     figure.savefig(
         FIGURE_DIRECTORY / f"{noise_type}_{condition}_history_spaghetti.png",
         dpi=160,

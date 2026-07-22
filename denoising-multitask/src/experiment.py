@@ -55,7 +55,6 @@ RESULT_COLUMNS = (
     "best_epoch",
     "best_validation_accuracy",
     "test_classification_loss",
-    "test_reconstruction_loss",
     "test_accuracy",
 )
 PILOT_RESULT_COLUMNS = (
@@ -131,84 +130,17 @@ def run_multitask_experiments(device: torch.device) -> None:
             _run_final_experiment(configuration, device)
 
 
-def train_one_epoch(
-    model: DenoisingAuxiliaryLeNet,
-    data_loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    reconstruction_weight: float,
-) -> EpochMetrics:
-    """DataLoader 전체를 한 번 순회해 CE 또는 CE+weighted MSE로 학습한다."""
-    model.train()
-    classification_loss_function = nn.CrossEntropyLoss()
-    reconstruction_loss_function = nn.MSELoss()
-    total_loss_sum = 0.0
-    classification_loss_sum = 0.0
-    reconstruction_loss_sum = 0.0
-    total_correct = 0
-    total_samples = 0
-    reconstruction_enabled = model.decoder is not None
-
-    for batch in data_loader:
-        noisy_images = batch["noisy_image"].to(device, non_blocking=True)
-        clean_targets = batch["clean_target"].to(device, non_blocking=True)
-        labels = batch["label"].to(device, non_blocking=True)
-        optimizer.zero_grad(set_to_none=True)
-        output = model(
-            noisy_images,
-            include_reconstruction=reconstruction_enabled,
-        )
-        classification_loss = classification_loss_function(
-            output["classification_logits"], labels
-        )
-        reconstruction_loss = None
-        total_loss = classification_loss
-        if reconstruction_enabled:
-            reconstruction = output["reconstruction"]
-            if reconstruction is None:
-                raise RuntimeError("Multitask 모델이 reconstruction을 반환하지 않았습니다.")
-            reconstruction_loss = reconstruction_loss_function(
-                reconstruction, clean_targets
-            )
-            total_loss = classification_loss + reconstruction_weight * reconstruction_loss
-        if not torch.isfinite(total_loss):
-            raise FloatingPointError(
-                f"유한하지 않은 training loss입니다: {float(total_loss.item())}"
-            )
-        total_loss.backward()
-        optimizer.step()
-
-        current_batch_size = labels.shape[0]
-        total_samples += current_batch_size
-        total_loss_sum += float(total_loss.item()) * current_batch_size
-        classification_loss_sum += float(classification_loss.item()) * current_batch_size
-        if reconstruction_loss is not None:
-            reconstruction_loss_sum += (
-                float(reconstruction_loss.item()) * current_batch_size
-            )
-        predictions = output["classification_logits"].argmax(dim=1)
-        total_correct += int((predictions == labels).sum().item())
-
-    return EpochMetrics(
-        total_loss=total_loss_sum / total_samples,
-        classification_loss=classification_loss_sum / total_samples,
-        reconstruction_loss=(
-            reconstruction_loss_sum / total_samples if reconstruction_enabled else None
-        ),
-        accuracy=total_correct / total_samples,
-    )
-
-
-@torch.no_grad()
-def evaluate_model(
+def _run_epoch(
     model: DenoisingAuxiliaryLeNet,
     data_loader: DataLoader,
     device: torch.device,
     reconstruction_weight: float,
+    optimizer: torch.optim.Optimizer | None = None,
     include_reconstruction: bool = False,
 ) -> EpochMetrics:
-    """Parameter를 변경하지 않고 loss와 classification accuracy를 계산한다."""
-    model.eval()
+    """DataLoader를 한 번 순회한다. optimizer가 있으면 학습, 없으면 평가한다."""
+    is_training = optimizer is not None
+    model.train() if is_training else model.eval()
     classification_loss_function = nn.CrossEntropyLoss()
     reconstruction_loss_function = nn.MSELoss()
     total_loss_sum = 0.0
@@ -216,44 +148,54 @@ def evaluate_model(
     reconstruction_loss_sum = 0.0
     total_correct = 0
     total_samples = 0
-    reconstruction_enabled = include_reconstruction and model.decoder is not None
+    reconstruction_enabled = (
+        (is_training or include_reconstruction) and model.decoder is not None
+    )
 
-    for batch in data_loader:
-        noisy_images = batch["noisy_image"].to(device, non_blocking=True)
-        clean_targets = batch["clean_target"].to(device, non_blocking=True)
-        labels = batch["label"].to(device, non_blocking=True)
-        output = model(
-            noisy_images,
-            include_reconstruction=include_reconstruction,
-        )
-        classification_loss = classification_loss_function(
-            output["classification_logits"], labels
-        )
-        reconstruction_loss = None
-        total_loss = classification_loss
-        if reconstruction_enabled:
-            reconstruction = output["reconstruction"]
-            if reconstruction is None:
-                raise RuntimeError("Multitask 모델이 reconstruction을 반환하지 않았습니다.")
-            reconstruction_loss = reconstruction_loss_function(
-                reconstruction, clean_targets
+    grad_context = torch.enable_grad() if is_training else torch.no_grad()
+    with grad_context:
+        for batch in data_loader:
+            noisy_images = batch["noisy_image"].to(device, non_blocking=True)
+            clean_targets = batch["clean_target"].to(device, non_blocking=True)
+            labels = batch["label"].to(device, non_blocking=True)
+            if is_training:
+                optimizer.zero_grad(set_to_none=True)
+            output = model(
+                noisy_images,
+                include_reconstruction=reconstruction_enabled,
             )
-            total_loss = classification_loss + reconstruction_weight * reconstruction_loss
-        if not torch.isfinite(total_loss):
-            raise FloatingPointError(
-                f"유한하지 않은 evaluation loss입니다: {float(total_loss.item())}"
+            classification_loss = classification_loss_function(
+                output["classification_logits"], labels
             )
+            reconstruction_loss = None
+            total_loss = classification_loss
+            if reconstruction_enabled:
+                reconstruction = output["reconstruction"]
+                if reconstruction is None:
+                    raise RuntimeError("Multitask 모델이 reconstruction을 반환하지 않았습니다.")
+                reconstruction_loss = reconstruction_loss_function(
+                    reconstruction, clean_targets
+                )
+                total_loss = classification_loss + reconstruction_weight * reconstruction_loss
+            if not torch.isfinite(total_loss):
+                phase = "training" if is_training else "evaluation"
+                raise FloatingPointError(
+                    f"유한하지 않은 {phase} loss입니다: {float(total_loss.item())}"
+                )
+            if is_training:
+                total_loss.backward()
+                optimizer.step()
 
-        current_batch_size = labels.shape[0]
-        total_samples += current_batch_size
-        total_loss_sum += float(total_loss.item()) * current_batch_size
-        classification_loss_sum += float(classification_loss.item()) * current_batch_size
-        if reconstruction_loss is not None:
-            reconstruction_loss_sum += (
-                float(reconstruction_loss.item()) * current_batch_size
-            )
-        predictions = output["classification_logits"].argmax(dim=1)
-        total_correct += int((predictions == labels).sum().item())
+            current_batch_size = labels.shape[0]
+            total_samples += current_batch_size
+            total_loss_sum += float(total_loss.item()) * current_batch_size
+            classification_loss_sum += float(classification_loss.item()) * current_batch_size
+            if reconstruction_loss is not None:
+                reconstruction_loss_sum += (
+                    float(reconstruction_loss.item()) * current_batch_size
+                )
+            predictions = output["classification_logits"].argmax(dim=1)
+            total_correct += int((predictions == labels).sum().item())
 
     return EpochMetrics(
         total_loss=total_loss_sum / total_samples,
@@ -303,12 +245,11 @@ def _run_final_experiment(
             device,
         )
 
-    test_metrics = evaluate_model(
+    test_metrics = _run_epoch(
         model,
         test_loader,
         device,
         configuration.reconstruction_weight,
-        include_reconstruction=False,
     )
     _upsert_final_result(configuration, training_result, test_metrics)
     print(
@@ -347,14 +288,14 @@ def _train_model(
             "validation_accuracy",
         ])
         for epoch in range(1, configuration.maximum_epochs + 1):
-            training_metrics = train_one_epoch(
+            training_metrics = _run_epoch(
                 model,
                 training_loader,
-                optimizer,
                 device,
                 configuration.reconstruction_weight,
+                optimizer=optimizer,
             )
-            validation_metrics = evaluate_model(
+            validation_metrics = _run_epoch(
                 model,
                 validation_loader,
                 device,
@@ -389,7 +330,6 @@ def _train_model(
                     "best_epoch": best_epoch,
                     "best_validation_accuracy": best_validation_accuracy,
                     "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
                 }, checkpoint_path)
 
     if best_epoch == 0:
@@ -561,7 +501,6 @@ def _upsert_final_result(
         "best_epoch": training_result.best_epoch,
         "best_validation_accuracy": training_result.best_validation_accuracy,
         "test_classification_loss": test_metrics.classification_loss,
-        "test_reconstruction_loss": test_metrics.reconstruction_loss,
         "test_accuracy": test_metrics.accuracy,
     }
     if RESULTS_PATH.exists():

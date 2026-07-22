@@ -42,8 +42,7 @@ Input 1×32×32
   → FC(84→10)
 ```
 
-이는 1998년 논문의 activation·subsampling·출력 방식까지 문자 그대로 재현한 원본
-LeNet-5가 아니라, PyTorch가 공식 tutorial에서 사용하는 현대적 LeNet 구현이다.
+원본 LeNet-5(1998)를 문자 그대로 재현한 것이 아니라 현대적 LeNet 구현이다.
 Multitask 모델은 두 번째 pooling의 `16×5×5` 출력을 shared bottleneck으로 사용해
 동일한 classification head와 denoising decoder로 분기한다.
 
