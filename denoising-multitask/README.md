@@ -140,6 +140,14 @@ python main.py train-alignment --device cuda
 정상 저장된 run은 건너뛴다. Epoch별 측정값은
 `outputs/gradient_alignment/measurements.csv`, 노이즈별 통계는 `summary.csv`에 남는다.
 
+Motion Blur에서 더 큰 λ `1`, `3`, `10`을 각각 5개 seed로 비교하려면 다음 명령을
+사용한다. 기존 λ `0.1` 실험은 다시 실행하지 않으며, 결과 요약은
+`outputs/gradient_alignment/weight_sweep_summary.csv`에 저장한다.
+
+```bash
+python main.py train-lambda-sweep --device cuda
+```
+
 `--device`는 `auto`, `cpu`, `cuda`를 지원하며 기본값은 `auto`다. `plot`은 학습을
 실행하지 않고 준비된 data와 저장된 checkpoint, history 및 CSV 결과만 읽는다.
 
@@ -155,7 +163,8 @@ denoising-multitask/
 │   ├── figures/             발표와 분석에 사용하는 PNG
 │   ├── gradient_alignment/
 │   │   ├── measurements.csv 학습 중 epoch별 gradient 측정값
-│   │   └── summary.csv      노이즈별 seed-level 통계 요약
+│   │   ├── summary.csv      노이즈별 seed-level 통계 요약
+│   │   └── weight_sweep_summary.csv 큰 λ 비교 요약
 │   ├── histories/           final run별 epoch history
 │   ├── pilot_results.csv    noise별 λ pilot 결과
 │   └── results.csv          seed별 test classification 결과
